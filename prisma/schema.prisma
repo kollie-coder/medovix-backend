@@ -1,0 +1,822 @@
+// prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Enums ──────────────────────────────────────────────────
+
+enum Role {
+  PUBLIC       // downloaded app, no hospital yet
+  PATIENT      // registered at one or more hospitals
+  DOCTOR
+  NURSE
+  PHARMACIST
+  LAB_TECHNICIAN
+  DIETICIAN
+  ADMIN
+  SUPER_ADMIN  // Medovix platform admin
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+enum BloodGroup {
+  A_POS
+  A_NEG
+  B_POS
+  B_NEG
+  AB_POS
+  AB_NEG
+  O_POS
+  O_NEG
+  UNKNOWN
+}
+
+enum HospitalPatientStatus {
+  ACTIVE
+  INACTIVE
+  TRANSFERRED
+  DECEASED
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+enum AppointmentType {
+  IN_PERSON
+  TELEMEDICINE
+  REQUEST
+}
+
+enum RecordType {
+  CONSULTATION
+  LAB_RESULT
+  PRESCRIPTION
+  VITALS
+  RADIOLOGY
+}
+
+enum PrescriptionStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum BillStatus {
+  PENDING
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum BillItemType {
+  CONSULTATION
+  LAB
+  PHARMACY
+  PROCEDURE
+  RADIOLOGY
+  ADMISSION
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  READ
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum SubscriptionPlan {
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  TRIAL
+}
+
+enum ReminderFrequency {
+  ONCE_DAILY
+  TWICE_DAILY
+  THREE_TIMES_DAILY
+  FOUR_TIMES_DAILY
+  EVERY_X_HOURS
+  AS_NEEDED
+}
+
+enum MealTiming {
+  BEFORE_MEAL
+  WITH_MEAL
+  AFTER_MEAL
+  ANY_TIME
+}
+
+enum HospitalType {
+  GENERAL
+  SPECIALIST
+  TEACHING
+  CLINIC
+  PHARMACY
+  DIAGNOSTIC
+}
+
+enum WalletTransactionType {
+  CREDIT
+  DEBIT
+}
+
+// ── Hospital (tenant) ──────────────────────────────────────
+
+model Hospital {
+  id          String             @id @default(cuid())
+  name        String
+  slug        String             @unique
+  type        HospitalType       @default(GENERAL)
+  address     String
+  city        String
+  state       String
+  country     String             @default("Nigeria")
+  phone       String
+  email       String             @unique
+  website     String?
+  logo        String?
+  latitude    Float?
+  longitude   Float?
+  googlePlaceId String?
+  verified    Boolean            @default(false)
+  active      Boolean            @default(true)
+  plan        SubscriptionPlan   @default(STARTER)
+  planStatus  SubscriptionStatus @default(TRIAL)
+  planExpiry  DateTime?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  deletedAt   DateTime?
+
+  // Relations
+  staff           User[]              // doctors, nurses, etc.
+  patients        HospitalPatient[]   // junction — patients at this hospital
+  departments     Department[]
+  appointments    Appointment[]
+  records         MedicalRecord[]
+  bills           Bill[]
+  conversations   Conversation[]
+  auditLogs       AuditLog[]
+  listing         HospitalListing?    // public-facing profile
+
+  @@index([slug])
+  @@index([city, state])
+}
+
+// ── Public-facing hospital listing ────────────────────────
+// Separate from the internal Hospital model.
+// This is what public app users see when searching.
+
+model HospitalListing {
+  id              String       @id @default(cuid())
+  hospitalId      String       @unique
+  hospital        Hospital     @relation(fields: [hospitalId], references: [id])
+  description     String?
+  specialties     String[]     @default([])
+  services        String[]     @default([])
+  openingHours    Json?        // { mon: { open: "08:00", close: "17:00" }, ... }
+  rating          Float        @default(0)
+  reviewCount     Int          @default(0)
+  medovixVerified Boolean      @default(false)
+  emergencyAvailable Boolean   @default(false)
+  photos          String[]     @default([])
+  updatedAt       DateTime     @updatedAt
+}
+
+// ── Department ─────────────────────────────────────────────
+
+model Department {
+  id         String    @id @default(cuid())
+  name       String
+  hospitalId String
+  hospital   Hospital  @relation(fields: [hospitalId], references: [id])
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime?
+
+  staff User[]
+
+  @@index([hospitalId])
+}
+
+// ── User (all roles including PUBLIC) ─────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  phone         String?   @unique
+  passwordHash  String
+  role          Role      @default(PUBLIC)
+  firstName     String
+  lastName      String
+  dateOfBirth   DateTime?
+  gender        Gender?
+  avatar        String?
+  active        Boolean   @default(true)
+  emailVerified Boolean   @default(false)
+  phoneVerified Boolean   @default(false)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime? // soft delete — GDPR anonymisation, not hard delete
+
+  // Staff only — null for PUBLIC/PATIENT users
+  hospitalId   String?
+  hospital     Hospital?   @relation(fields: [hospitalId], references: [id])
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id])
+
+  // Relations
+  publicProfile    PublicProfile?     // for PUBLIC users
+  patientProfile   PatientProfile?    // for PATIENT users
+  staffProfile     StaffProfile?      // for DOCTOR/NURSE etc.
+  hospitalPatients HospitalPatient[]  // hospitals this user is a patient at
+  pushTokens       PushToken[]
+  refreshTokens    RefreshToken[]
+  reminders        MedicationReminder[]
+  sentMessages     Message[]          @relation("SentMessages")
+  auditLogs        AuditLog[]
+  notifications    Notification[]
+
+  dietProfile      DietProfile?
+
+  // Appointments
+  patientAppointments Appointment[] @relation("PatientAppointments")
+  doctorAppointments  Appointment[] @relation("DoctorAppointments")
+
+
+  // Records
+  medicalRecords MedicalRecord[] @relation("RecordCreatedBy")
+  patientRecords MedicalRecord[] @relation("PatientRecords")
+
+  // Conversations
+  conversations ConversationParticipant[]
+
+  @@index([role])
+  @@index([email])
+  @@index([hospitalId])
+}
+
+// ── Hospital ↔ Patient junction ────────────────────────────
+// A patient can be registered at multiple hospitals.
+// Each row = one patient at one hospital.
+
+model HospitalPatient {
+  id              String                @id @default(cuid())
+  hospitalId      String
+  hospital        Hospital              @relation(fields: [hospitalId], references: [id])
+  patientId       String
+  patient         User                  @relation(fields: [patientId], references: [id])
+  patientNumber   String                // hospital-specific patient ID e.g. LGH-2025-00142
+  status          HospitalPatientStatus @default(ACTIVE)
+  primaryDoctorId String?
+  registeredAt    DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+
+  @@unique([hospitalId, patientId])    // one record per patient per hospital
+  @@unique([hospitalId, patientNumber]) // patient numbers unique within hospital
+  @@index([patientId])
+  @@index([hospitalId])
+}
+
+// ── Public profile (PUBLIC role users) ────────────────────
+
+model PublicProfile {
+  id          String     @id @default(cuid())
+  userId      String     @unique
+  user        User       @relation(fields: [userId], references: [id])
+  bloodGroup  BloodGroup @default(UNKNOWN)
+  allergies   String[]   @default([])
+  weight      Float?
+  height      Float?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+// ── Patient profile (PATIENT role — hospital-registered) ──
+
+model PatientProfile {
+  id                String      @id @default(cuid())
+  userId            String      @unique
+  user              User        @relation(fields: [userId], references: [id])
+  bloodGroup        BloodGroup  @default(UNKNOWN)
+  allergies         String[]    @default([])
+  chronicConditions String[]    @default([])
+  emergencyName     String?
+  emergencyPhone    String?
+  emergencyRelation String?
+  insuranceProvider String?
+  insuranceNumber   String?
+  weight            Float?
+  height            Float?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// ── Staff profile ──────────────────────────────────────────
+
+model StaffProfile {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id])
+  specialization  String?
+  licenseNumber   String?
+  experience      Int?
+  bio             String?
+  consultationFee Float?
+  available       Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ── Push tokens ────────────────────────────────────────────
+
+model PushToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  platform  String   // ios | android
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ── Refresh tokens ─────────────────────────────────────────
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  revoked   Boolean  @default(false)
+
+  @@index([userId])
+}
+
+// ── Medication reminders (public app) ─────────────────────
+
+model MedicationReminder {
+  id          String            @id @default(cuid())
+  userId      String
+  user        User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  drugName    String
+  dosage      String
+  frequency   ReminderFrequency @default(ONCE_DAILY)
+  times       String[]          // ["08:00", "20:00"]
+  mealTiming  MealTiming        @default(AFTER_MEAL)
+  startDate   DateTime
+  endDate     DateTime?
+  color       String            @default("#0A7EA4")
+  notes       String?
+  active      Boolean           @default(true)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  deletedAt   DateTime?
+
+  doses ReminderDose[]
+
+  @@index([userId])
+}
+
+// ── Reminder dose tracking ─────────────────────────────────
+
+model ReminderDose {
+  id           String             @id @default(cuid())
+  reminderId   String
+  reminder     MedicationReminder @relation(fields: [reminderId], references: [id], onDelete: Cascade)
+  scheduledAt  DateTime           // when it was supposed to be taken
+  takenAt      DateTime?          // when it was actually taken (null = not taken yet)
+  skipped      Boolean            @default(false)
+  snoozedUntil DateTime?
+  createdAt    DateTime           @default(now())
+
+  @@index([reminderId])
+  @@index([scheduledAt])
+}
+
+// ── Appointments ───────────────────────────────────────────
+
+model Appointment {
+  id           String            @id @default(cuid())
+  hospitalId   String
+  hospital     Hospital          @relation(fields: [hospitalId], references: [id])
+  patientId    String
+  patient      User              @relation("PatientAppointments", fields: [patientId], references: [id])
+  doctorId     String
+  doctor       User              @relation("DoctorAppointments", fields: [doctorId], references: [id])
+  type         AppointmentType   @default(IN_PERSON)
+  status       AppointmentStatus @default(PENDING)
+  scheduledAt  DateTime
+  duration     Int               @default(30)
+  reason       String?
+  notes        String?
+  cancelledAt  DateTime?
+  cancelReason String?
+  completedAt  DateTime?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  deletedAt    DateTime?
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([scheduledAt])
+  @@index([status])
+}
+
+// ── Medical records ────────────────────────────────────────
+
+model MedicalRecord {
+  id          String        @id @default(cuid())
+  hospitalId  String
+  hospital    Hospital      @relation(fields: [hospitalId], references: [id])
+  patientId   String
+  patient     User          @relation("PatientRecords", fields: [patientId], references: [id])
+  type        RecordType
+  title       String
+  summary     String?
+  createdById String
+  createdBy   User          @relation("RecordCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?     // soft delete only — never hard delete medical records
+
+  consultation ConsultationRecord?
+  labResult    LabResult?
+  prescription Prescription?
+  vitals       VitalsRecord?
+  radiology    RadiologyRecord?
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model ConsultationRecord {
+  id           String        @id @default(cuid())
+  recordId     String        @unique
+  record       MedicalRecord @relation(fields: [recordId], references: [id])
+  diagnosis    String
+  symptoms     String[]
+  findings     String
+  notes        String?
+  followUpDate DateTime?
+  createdAt    DateTime      @default(now())
+}
+
+model LabResult {
+  id            String        @id @default(cuid())
+  recordId      String        @unique
+  record        MedicalRecord @relation(fields: [recordId], references: [id])
+  testName      String
+  requestedBy   String
+  overallStatus String
+  impression    String?
+  results       Json          // [{ parameter, value, unit, range, status }]
+  createdAt     DateTime      @default(now())
+}
+
+model Prescription {
+  id             String             @id @default(cuid())
+  recordId       String             @unique
+  record         MedicalRecord      @relation(fields: [recordId], references: [id])
+  status         PrescriptionStatus @default(ACTIVE)
+  expiryDate     DateTime?
+  refillsAllowed Int                @default(0)
+  refillsUsed    Int                @default(0)
+  notes          String?
+  medications    PrescriptionItem[]
+  createdAt      DateTime           @default(now())
+}
+
+model PrescriptionItem {
+  id             String       @id @default(cuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  name           String
+  dosage         String
+  frequency      String
+  duration       String
+  instructions   String?
+  createdAt      DateTime     @default(now())
+}
+
+model VitalsRecord {
+  id          String        @id @default(cuid())
+  recordId    String        @unique
+  record      MedicalRecord @relation(fields: [recordId], references: [id])
+  bpSystolic  Int?
+  bpDiastolic Int?
+  pulse       Int?
+  temperature Float?
+  spo2        Int?
+  weight      Float?
+  height      Float?
+  bmi         Float?
+  notes       String?
+  createdAt   DateTime      @default(now())
+}
+
+model RadiologyRecord {
+  id          String        @id @default(cuid())
+  recordId    String        @unique
+  record      MedicalRecord @relation(fields: [recordId], references: [id])
+  scanType    String
+  bodyPart    String
+  requestedBy String
+  findings    String
+  impression  String
+  radiologist String
+  contrast    Boolean       @default(false)
+  createdAt   DateTime      @default(now())
+}
+
+// ── Billing ────────────────────────────────────────────────
+
+model Bill {
+  id          String     @id @default(cuid())
+  hospitalId  String
+  hospital    Hospital   @relation(fields: [hospitalId], references: [id])
+  patientId   String
+  invoiceNo   String     @unique
+  status      BillStatus @default(PENDING)
+  totalAmount Float
+  amountPaid  Float      @default(0)
+  dueDate     DateTime
+  paidAt      DateTime?
+  notes       String?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  deletedAt   DateTime?
+
+  items    BillItem[]
+  payments Payment[]
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([status])
+}
+
+model BillItem {
+  id        String       @id @default(cuid())
+  billId    String
+  bill      Bill         @relation(fields: [billId], references: [id])
+  type      BillItemType
+  name      String
+  quantity  Int          @default(1)
+  unitPrice Float
+  total     Float
+  createdAt DateTime     @default(now())
+}
+
+model Payment {
+  id        String   @id @default(cuid())
+  billId    String
+  bill      Bill     @relation(fields: [billId], references: [id])
+  amount    Float
+  method    String   // wallet | card | bank
+  reference String?
+  paidAt    DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([billId])
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  balance   Float    @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id          String                @id @default(cuid())
+  walletId    String
+  wallet      Wallet                @relation(fields: [walletId], references: [id])
+  amount      Float
+  type        WalletTransactionType
+  description String
+  reference   String?
+  createdAt   DateTime              @default(now())
+
+  @@index([walletId])
+}
+
+// ── Messaging ──────────────────────────────────────────────
+
+model Conversation {
+  id         String   @id @default(cuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([hospitalId])
+}
+
+model ConversationParticipant {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  joinedAt       DateTime     @default(now())
+  lastReadAt     DateTime?
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String        @id @default(cuid())
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id])
+  senderId       String
+  sender         User          @relation("SentMessages", fields: [senderId], references: [id])
+  text           String
+  status         MessageStatus @default(SENT)
+  sentAt         DateTime      @default(now())
+  deliveredAt    DateTime?
+  readAt         DateTime?
+  deletedAt      DateTime?
+
+  @@index([conversationId])
+  @@index([senderId])
+}
+
+// ── Notifications ──────────────────────────────────────────
+
+model Notification {
+  id        String             @id @default(cuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id])
+  title     String
+  body      String
+  type      String             // appointment | lab | prescription | bill | message | health_tip | reminder
+  data      Json?
+  read      Boolean            @default(false)
+  status    NotificationStatus @default(PENDING)
+  sentAt    DateTime?
+  createdAt DateTime           @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ── Audit log ──────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  action     String   // CREATE | UPDATE | DELETE | LOGIN | LOGOUT | VIEW
+  entity     String   // User | MedicalRecord | Appointment | Bill etc.
+  entityId   String
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([hospitalId])
+  @@index([userId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+}
+
+
+
+
+
+// ── Dietary feature ────────────────────────────────────────
+
+enum ActivityLevel {
+  SEDENTARY
+  LIGHT
+  MODERATE
+  ACTIVE
+  VERY_ACTIVE
+}
+
+enum HealthCondition {
+  GENERAL_WELLNESS
+  TYPE2_DIABETES
+  HYPERTENSION
+  HEART_DISEASE
+  WEIGHT_LOSS
+  PREGNANCY
+  OSTEOPOROSIS
+  LACTOSE_INTOLERANCE
+}
+
+enum MealType {
+  BREAKFAST
+  LUNCH
+  DINNER
+  SNACK
+}
+
+model DietProfile {
+  id             String          @id @default(cuid())
+  userId         String          @unique
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  condition      HealthCondition @default(GENERAL_WELLNESS)
+  age            Int?
+  weight         Float?          // kg
+  height         Float?          // cm
+  activityLevel  ActivityLevel   @default(MODERATE)
+  dailyCalories  Int             @default(2000)
+  dailyCarbs     Int             @default(250)   // grams
+  dailyProtein   Int             @default(50)    // grams
+  dailyFat       Int             @default(65)    // grams
+  dailyWater     Float           @default(2.0)   // litres
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  foodLogs       FoodLog[]
+}
+
+model FoodItem {
+  id          String   @id @default(cuid())
+  name        String
+  category    String   // e.g. "Grains", "Protein", "Vegetables"
+  origin      String   @default("international") // "nigerian" | "international"
+  calories    Float    // per 100g
+  carbs       Float    // per 100g
+  protein     Float    // per 100g
+  fat         Float    // per 100g
+  fibre       Float    @default(0)
+  sodium      Float    @default(0) // mg per 100g
+  sugar       Float    @default(0)
+  // Which conditions this food is suitable for
+  suitableFor String[] @default([]) // HealthCondition values
+  // Which conditions to avoid
+  avoidFor    String[] @default([])
+  createdAt   DateTime @default(now())
+
+  foodLogs FoodLog[]
+
+  @@index([category])
+  @@index([origin])
+}
+
+model FoodLog {
+  id            String      @id @default(cuid())
+  dietProfileId String
+  dietProfile   DietProfile @relation(fields: [dietProfileId], references: [id], onDelete: Cascade)
+  foodItemId    String
+  foodItem      FoodItem    @relation(fields: [foodItemId], references: [id])
+  mealType      MealType
+  portionGrams  Float       @default(100)
+  calories      Float       // calculated from portion
+  carbs         Float
+  protein       Float
+  fat           Float
+  loggedAt      DateTime    @default(now())
+  date          String      // YYYY-MM-DD for easy daily queries
+
+  @@index([dietProfileId])
+  @@index([date])
+}
