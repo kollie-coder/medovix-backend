@@ -215,25 +215,80 @@ export class DietaryService {
     return { message: 'Log deleted' }
   }
 
-  // ── Search food items (filter avoidFor in app layer) ──
-  async searchFood(query: string, condition?: string) {
-    const results = await this.prisma.foodItem.findMany({
-      where: {
-        OR: [
-          { name: { contains: query, mode: 'insensitive' } },
-          { category: { contains: query, mode: 'insensitive' } },
-        ],
-      },
-      take: 30,
-      orderBy: { name: 'asc' },
-    })
+  // ── Common stopwords to exclude from search matching ──────
+  private readonly STOPWORDS = new Set([
+    'and', 'or', 'with', 'the', 'a', 'an', 'of', 'in', 'on', 'for', 'to',
+  ])
 
-    // Filter out foods to avoid for this condition in application layer
-    if (condition && condition !== 'GENERAL_WELLNESS') {
-      return results.filter(f => !f.avoidFor.includes(condition))
+  private filterMeaningfulWords(words: string[]): string[] {
+    const filtered = words.filter(w => w.length > 1 && !this.STOPWORDS.has(w.toLowerCase()))
+    // If filtering removes everything, fall back to original words
+    return filtered.length > 0 ? filtered : words.filter(w => w.length > 1)
+  }
+
+  // ── Synonym normalization ────────────────────────────────
+  // Maps common cooking-method synonyms so "boiled rice" matches "Rice (cooked)"
+  private normalizeSynonyms(query: string): string {
+    const SYNONYM_MAP: Record<string, string> = {
+      boiled: 'cooked',
+      steamed: 'cooked',
+      grilled: 'grilled', // keep as-is, distinct cooking method
+      fried: 'fried',
+      roasted: 'grilled',
     }
 
-    return results
+    return query
+      .split(/\s+/)
+      .map(word => SYNONYM_MAP[word.toLowerCase()] ?? word)
+      .join(' ')
+  }
+
+  // ── Search food items (filter avoidFor in app layer) ──
+  async searchFood(query: string, condition?: string) {
+    const original = this.filterMeaningfulWords(query.trim().split(/\s+/))
+    const normalized = this.filterMeaningfulWords(this.normalizeSynonyms(query).trim().split(/\s+/))
+
+    // Try original words first (AND match), fall back to synonym-normalized words
+    const tryWords = async (words: string[]) => {
+      if (words.length === 0) return []
+      const where = {
+        AND: words.map(word => ({
+          OR: [
+            { name: { contains: word, mode: 'insensitive' as const } },
+            { category: { contains: word, mode: 'insensitive' as const } },
+          ],
+        })),
+      }
+      return this.prisma.foodItem.findMany({ where, take: 30 })
+    }
+
+    let results = await tryWords(original)
+    if (results.length === 0 && JSON.stringify(normalized) !== JSON.stringify(original)) {
+      results = await tryWords(normalized)
+    }
+
+    // Rank by relevance: exact name match first, then how many words match, then alphabetical
+    const queryLower = query.trim().toLowerCase()
+    const ranked = results.sort((a, b) => {
+      const aName = a.name.toLowerCase()
+      const bName = b.name.toLowerCase()
+
+      const aExact = aName === queryLower ? 1 : 0
+      const bExact = bName === queryLower ? 1 : 0
+      if (aExact !== bExact) return bExact - aExact
+
+      const aStarts = aName.startsWith(queryLower) ? 1 : 0
+      const bStarts = bName.startsWith(queryLower) ? 1 : 0
+      if (aStarts !== bStarts) return bStarts - aStarts
+
+      return aName.localeCompare(bName)
+    })
+
+    if (condition && condition !== 'GENERAL_WELLNESS') {
+      return ranked.filter(f => !f.avoidFor.includes(condition))
+    }
+
+    return ranked
   }
 
   // ── Get meal suggestions ───────────────────────────────
@@ -243,14 +298,12 @@ export class DietaryService {
 
     const condition = profile.condition
 
-    // Get all foods suitable for condition, filter avoidFor in app layer
     const allFoods = await this.prisma.foodItem.findMany({
       where: { suitableFor: { has: condition } },
     })
 
     const suitableFoods = allFoods.filter(f => !f.avoidFor.includes(condition))
 
-    // Rotate suggestions by day of year
     const today = new Date()
     const dayOfYear = Math.floor(
       (today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) /
@@ -327,7 +380,6 @@ export class DietaryService {
     ]
 
     return [
-      // Nigerian foods
       { name: 'Jollof Rice', category: 'Grains', origin: 'nigerian', calories: 185, carbs: 36, protein: 4, fat: 3.5, fibre: 1.2, sodium: 380, sugar: 2, suitableFor: ['GENERAL_WELLNESS', 'PREGNANCY'], avoidFor: ['TYPE2_DIABETES'] },
       { name: 'Fried Rice', category: 'Grains', origin: 'nigerian', calories: 200, carbs: 32, protein: 6, fat: 6, fibre: 1.5, sodium: 450, sugar: 2, suitableFor: ['GENERAL_WELLNESS'], avoidFor: ['TYPE2_DIABETES', 'HYPERTENSION', 'HEART_DISEASE'] },
       { name: 'Pounded Yam', category: 'Grains', origin: 'nigerian', calories: 165, carbs: 39, protein: 2, fat: 0.3, fibre: 1.8, sodium: 10, sugar: 1, suitableFor: ['GENERAL_WELLNESS', 'PREGNANCY', 'OSTEOPOROSIS'], avoidFor: ['TYPE2_DIABETES', 'WEIGHT_LOSS'] },
@@ -357,8 +409,6 @@ export class DietaryService {
       { name: 'Zobo (Hibiscus drink)', category: 'Beverages', origin: 'nigerian', calories: 40, carbs: 9, protein: 0.5, fat: 0.1, fibre: 0.5, sodium: 5, sugar: 8, suitableFor: ['GENERAL_WELLNESS', 'HYPERTENSION'], avoidFor: ['PREGNANCY'] },
       { name: 'Pap (Ogi/Akamu)', category: 'Grains', origin: 'nigerian', calories: 65, carbs: 14, protein: 1, fat: 0.5, fibre: 0.8, sodium: 3, sugar: 0.5, suitableFor: ['GENERAL_WELLNESS', 'PREGNANCY', 'LACTOSE_INTOLERANCE'], avoidFor: [] },
       { name: 'Groundnuts (Peanuts)', category: 'Nuts & Seeds', origin: 'nigerian', calories: 567, carbs: 16, protein: 26, fat: 49, fibre: 8.5, sodium: 18, sugar: 4, suitableFor: ['GENERAL_WELLNESS', 'TYPE2_DIABETES', 'HEART_DISEASE', 'WEIGHT_LOSS', 'PREGNANCY'], avoidFor: [] },
-
-      // International foods
       { name: 'Brown Rice (cooked)', category: 'Grains', origin: 'international', calories: 123, carbs: 26, protein: 2.7, fat: 1, fibre: 1.6, sodium: 1, sugar: 0.4, suitableFor: ALL, avoidFor: [] },
       { name: 'White Rice (cooked)', category: 'Grains', origin: 'international', calories: 130, carbs: 28, protein: 2.7, fat: 0.3, fibre: 0.4, sodium: 1, sugar: 0.1, suitableFor: ['GENERAL_WELLNESS', 'PREGNANCY', 'LACTOSE_INTOLERANCE'], avoidFor: ['TYPE2_DIABETES', 'WEIGHT_LOSS'] },
       { name: 'Whole Wheat Bread', category: 'Grains', origin: 'international', calories: 247, carbs: 41, protein: 13, fat: 3.4, fibre: 6, sodium: 400, sugar: 5, suitableFor: ['GENERAL_WELLNESS', 'HEART_DISEASE', 'HYPERTENSION', 'WEIGHT_LOSS', 'LACTOSE_INTOLERANCE'], avoidFor: [] },
@@ -391,5 +441,292 @@ export class DietaryService {
       { name: 'Water (plain)', category: 'Beverages', origin: 'international', calories: 0, carbs: 0, protein: 0, fat: 0, fibre: 0, sodium: 0, sugar: 0, suitableFor: ALL, avoidFor: [] },
       { name: 'Green Tea', category: 'Beverages', origin: 'international', calories: 2, carbs: 0.5, protein: 0.3, fat: 0, fibre: 0, sodium: 1, sugar: 0, suitableFor: ALL, avoidFor: [] },
     ]
+  }
+
+  // ── Open Food Facts fallback search ─────────────────────
+  async searchFoodFallback(query: string) {
+    try {
+      const url = `https://world.openfoodfacts.org/cgi/search.pl?` +
+        `search_terms=${encodeURIComponent(query)}` +
+        `&search_simple=1&action=process&json=1&page_size=10` +
+        `&fields=product_name,nutriments,serving_size,image_url`
+
+      const response = await fetch(url, {
+        headers: { 'User-Agent': 'Medovix - Healthcare App - Android/iOS - Version 1.0' },
+      })
+
+      if (!response.ok) return []
+
+      const data = await response.json()
+
+      return (data.products ?? [])
+        .filter((p: any) =>
+          p.product_name &&
+          p.nutriments?.['energy-kcal_100g'] != null
+        )
+        .map((p: any) => ({
+          id: `off_${p.code ?? p.product_name.replace(/\s+/g, '_')}`,
+          name: p.product_name,
+          category: 'International',
+          origin: 'international',
+          calories: Math.round(p.nutriments['energy-kcal_100g'] ?? 0),
+          carbs: Math.round(p.nutriments['carbohydrates_100g'] ?? 0),
+          protein: Math.round(p.nutriments['proteins_100g'] ?? 0),
+          fat: Math.round(p.nutriments['fat_100g'] ?? 0),
+          fibre: Math.round(p.nutriments['fiber_100g'] ?? 0),
+          sodium: Math.round((p.nutriments['sodium_100g'] ?? 0) * 1000),
+          sugar: Math.round(p.nutriments['sugars_100g'] ?? 0),
+          suitableFor: ['GENERAL_WELLNESS'],
+          avoidFor: [],
+          fromOpenFoodFacts: true,
+          servingSize: p.serving_size ?? null,
+          imageUrl: p.image_url ?? null,
+        }))
+    } catch (err) {
+      console.error('Open Food Facts error:', err)
+      return []
+    }
+  }
+
+  // ── Log custom food (not in database) ───────────────────
+  async logCustomFood(userId: string, dto: {
+    name: string
+    mealType: MealType
+    calories: number
+    carbs: number
+    protein: number
+    fat: number
+    portionGrams: number
+    date: string
+  }) {
+    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
+    if (!profile) throw new NotFoundException('Diet profile not found')
+
+    const foodItem = await this.prisma.foodItem.create({
+      data: {
+        name: dto.name,
+        category: 'Custom',
+        origin: 'custom',
+        calories: dto.calories / (dto.portionGrams / 100),
+        carbs: dto.carbs / (dto.portionGrams / 100),
+        protein: dto.protein / (dto.portionGrams / 100),
+        fat: dto.fat / (dto.portionGrams / 100),
+        fibre: 0,
+        sodium: 0,
+        sugar: 0,
+        suitableFor: ['GENERAL_WELLNESS'],
+        avoidFor: [],
+      },
+    })
+
+    return this.prisma.foodLog.create({
+      data: {
+        dietProfileId: profile.id,
+        foodItemId: foodItem.id,
+        mealType: dto.mealType,
+        portionGrams: dto.portionGrams,
+        calories: dto.calories,
+        carbs: dto.carbs,
+        protein: dto.protein,
+        fat: dto.fat,
+        date: dto.date,
+      },
+      include: { foodItem: true },
+    })
+  }
+
+  // ── Nutrition estimation (own DB first, then AI, then Open Food Facts) ──
+  async estimateNutrition(foodName: string, portionGrams: number = 100) {
+    console.log('=== Estimate nutrition for:', foodName, '===')
+
+    const ownMatches = await this.searchFood(foodName)
+    console.log('Own DB matches:', ownMatches.length)
+
+    if (ownMatches.length > 0) {
+      const best = ownMatches[0]
+      const factor = portionGrams / 100
+      console.log('Own DB best match:', best.name)
+      return {
+        foodName, portionGrams,
+        calories: Math.round(best.calories * factor),
+        carbs: Math.round(best.carbs * factor),
+        protein: Math.round(best.protein * factor),
+        fat: Math.round(best.fat * factor),
+        source: 'ownDatabase' as const,
+        confidence: 'high' as const,
+        matchedFood: best.name,
+        disclaimer: `Matched to "${best.name}" in our food database.`,
+      }
+    }
+
+    const apiKey = process.env.ANTHROPIC_API_KEY
+    console.log('Claude API key present:', !!apiKey)
+    if (apiKey) {
+      try {
+        const result = await this.estimateWithClaude(foodName, portionGrams, apiKey)
+        if (result) return result
+      } catch (err) {
+        console.error('Claude estimation failed, falling back to Open Food Facts:', err)
+      }
+    }
+
+    console.log('Falling through to Open Food Facts...')
+    return this.estimateWithOpenFoodFacts(foodName, portionGrams)
+  }
+
+  // ── Claude AI estimation ───────────────────────────────────
+  private async estimateWithClaude(foodName: string, portionGrams: number, apiKey: string) {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 200,
+        messages: [{
+          role: 'user',
+          content: `Estimate the nutritional values for "${foodName}" per ${portionGrams}g portion.
+Reply ONLY with a JSON object in this exact format, no other text:
+{"calories":0,"carbs":0,"protein":0,"fat":0,"confidence":"high|medium|low"}
+Base your estimates on typical Nigerian/African or international food data.`,
+        }],
+      }),
+    })
+
+    if (!response.ok) throw new Error(`Claude API error: ${response.status}`)
+
+    const data = await response.json()
+    const text = data.content?.[0]?.text ?? ''
+    const parsed = JSON.parse(text.trim())
+
+    return {
+      foodName,
+      portionGrams,
+      calories: Math.round(parsed.calories),
+      carbs: Math.round(parsed.carbs),
+      protein: Math.round(parsed.protein),
+      fat: Math.round(parsed.fat),
+      source: 'ai' as const,
+      confidence: parsed.confidence ?? 'medium',
+      disclaimer: 'AI estimated values — may vary. Edit before logging if needed.',
+    }
+  }
+
+  // ── Open Food Facts fallback estimation ───────────────────
+  private async estimateWithOpenFoodFacts(foodName: string, portionGrams: number) {
+    // The legacy cgi/search.pl endpoint actually performs free-text search correctly.
+    // The v2 /api/v2/search endpoint's product_name param does NOT filter by text
+    // (confirmed: it returns unrelated products regardless of query) — do not use it for search.
+    const searchUrl = `https://world.openfoodfacts.org/cgi/search.pl?` +
+      `search_terms=${encodeURIComponent(foodName)}` +
+      `&search_simple=1&json=1&page_size=20` +
+      `&fields=product_name,nutriments`
+
+    const headers = {
+      'User-Agent': 'Medovix - Healthcare App - Android/iOS - Version 1.0',
+      'Accept': 'application/json',
+    }
+
+    try {
+      console.log('OFF estimate URL:', searchUrl)
+      let response = await fetch(searchUrl, { headers })
+      console.log('OFF estimate status:', response.status)
+
+      // Retry up to 2 times on transient 503s
+      let attempts = 0
+      while (!response.ok && attempts < 2) {
+        attempts++
+        await new Promise(r => setTimeout(r, 800 * attempts))
+        response = await fetch(searchUrl, { headers })
+        console.log(`OFF estimate retry ${attempts} status:`, response.status)
+      }
+
+      if (!response.ok) throw new Error(`Open Food Facts unavailable (${response.status})`)
+
+      const data = await response.json()
+      console.log('OFF estimate products count:', data.products?.length)
+
+      const productsRaw = data.products ?? data.hits ?? []
+
+      const searchWords = this.filterMeaningfulWords(foodName.toLowerCase().split(/\s+/))
+
+      // Hard requirement: product name must contain at least one search word.
+      // Without this, irrelevant products (e.g. cheese for "rice") can slip through.
+      const products = productsRaw.filter((p: any) => {
+        if (!p.product_name || p.nutriments?.['energy-kcal_100g'] == null) return false
+        const name = p.product_name.toLowerCase()
+        return searchWords.some((w: string) => name.includes(w))
+      })
+
+      console.log('OFF estimate filtered count:', products.length)
+
+      if (products.length === 0) {
+        return {
+          foodName, portionGrams, calories: 0, carbs: 0, protein: 0, fat: 0,
+          source: 'unknown' as const, confidence: 'none' as const,
+          disclaimer: 'Could not estimate nutrition for this food. Please enter values manually or log without data.',
+        }
+      }
+
+      // Score products by name match quality + calorie plausibility
+      // to avoid matching plain search terms (e.g. "rice") to snacks (e.g. rice cakes at 1900 kcal)
+
+      // Known brand/snack keywords that indicate a processed product, not the base food
+      const BRAND_PENALTY_WORDS = [
+        'krispies', 'kellogg', 'nestle', 'cereal', 'cakes', 'crackers',
+        'snack', 'chips', 'crisps', 'pudding', 'cookie', 'biscuit',
+        'flavoured', 'flavored', 'instant', 'ready meal', 'frozen meal',
+        'sauce', 'drink', 'juice', 'syrup', 'candy', 'sweet', 'dessert',
+      ]
+
+      const scored = products.map((p: any) => {
+        const name = p.product_name.toLowerCase()
+        const nameWords = name.split(/\s+/)
+
+        const matchCount = searchWords.filter((w: string) => name.includes(w)).length
+        const lengthPenalty = Math.max(0, nameWords.length - searchWords.length - 2) * 0.7
+        const kcal = p.nutriments['energy-kcal_100g'] ?? 0
+        const plausibilityBonus = (kcal >= 20 && kcal <= 400) ? 1 : 0
+
+        const startsWithBonus = name.startsWith(searchWords[0]) ? 1.5 : 0
+
+        // Exact match bonus — product name IS just the search term (e.g. "rice" === "rice")
+        const exactMatchBonus = name === foodName.toLowerCase() ? 3 : 0
+
+        // Penalise branded/processed snack products heavily
+        const brandPenalty = BRAND_PENALTY_WORDS.some(w => name.includes(w)) ? 3 : 0
+
+        const score = matchCount + plausibilityBonus + startsWithBonus + exactMatchBonus - lengthPenalty - brandPenalty
+        return { product: p, score }
+      })
+
+      scored.sort((a: any, b: any) => b.score - a.score)
+      const best = scored[0].product
+
+      console.log('OFF estimate best match:', best.product_name, 'score:', scored[0].score)
+
+      const factor = portionGrams / 100
+
+      return {
+        foodName, portionGrams,
+        calories: Math.round((best.nutriments['energy-kcal_100g'] ?? 0) * factor),
+        carbs: Math.round((best.nutriments['carbohydrates_100g'] ?? 0) * factor),
+        protein: Math.round((best.nutriments['proteins_100g'] ?? 0) * factor),
+        fat: Math.round((best.nutriments['fat_100g'] ?? 0) * factor),
+        source: 'openfoodfacts' as const, confidence: 'medium' as const,
+        matchedFood: best.product_name,
+        disclaimer: `Values from Open Food Facts based on "${best.product_name}". Please verify and edit if needed.`,
+      }
+    } catch (err) {
+      console.error('OFF estimate error:', err)
+      return {
+        foodName, portionGrams, calories: 0, carbs: 0, protein: 0, fat: 0,
+        source: 'unknown' as const, confidence: 'none' as const,
+        disclaimer: 'Could not estimate nutrition for this food. Please enter values manually or log without data.',
+      }
+    }
   }
 }
