@@ -1,6 +1,6 @@
-// src/auth/auth.controller.ts
+// src/auth/auth.controller.ts (full file with profile update added)
 import {
-  Controller, Post, Get, Body, UseGuards, HttpCode,
+  Controller, Post, Get, Put, Body, UseGuards, HttpCode,
 } from '@nestjs/common'
 import { AuthService } from './auth.service'
 import { RegisterDto } from './dto/register.dto'
@@ -49,5 +49,90 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   getMe(@CurrentUser('id') userId: string) {
     return this.authService.getMe(userId)
+  }
+
+
+  @Put('change-password')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  changePassword(
+    @CurrentUser('id') userId: string,
+    @Body() dto: { currentPassword: string; newPassword: string },
+  ) {
+    return this.authService.changePassword(userId, dto)
+  }
+  
+  @Post('2fa/setup')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  setup2FA(
+    @CurrentUser('id') userId: string,
+    @CurrentUser('email') userEmail: string,
+  ) {
+    return this.authService.setup2FA(userId, userEmail)
+  }
+  
+  @Post('2fa/verify')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  verify2FA(
+    @CurrentUser('id') userId: string,
+    @Body('code') code: string,
+  ) {
+    return this.authService.verify2FA(userId, code)
+  }
+  
+  @Post('2fa/disable')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  disable2FA(
+    @CurrentUser('id') userId: string,
+    @Body('password') password: string,
+  ) {
+    return this.authService.disable2FA(userId, password)
+  }
+
+   @Post('2fa/backup-codes/regenerate')
+    @UseGuards(JwtAuthGuard)
+    @HttpCode(200)
+    regenerateBackupCodes(
+      @CurrentUser('id') userId: string,
+      @Body('password') password: string,
+    ) {
+      return this.authService.regenerateBackupCodes(userId, password)
+    }
+    
+    @Get('2fa/status')
+    @UseGuards(JwtAuthGuard)
+    getBackupCodeStatus(@CurrentUser('id') userId: string) {
+      return this.authService.getBackupCodeStatus(userId)
+    }
+      
+  @Post('2fa/login-verify')
+  @HttpCode(200)
+  completeLogin2FA(
+    @Body('pendingToken') pendingToken: string,
+    @Body('code') code: string,
+  ) {
+    return this.authService.completeLogin2FA(pendingToken, code)
+  }
+
+  @Put('profile')
+  @UseGuards(JwtAuthGuard)
+  updateProfile(
+    @CurrentUser('id') userId: string,
+    @Body() dto: {
+      firstName?: string
+      lastName?: string
+      phone?: string
+      dateOfBirth?: string
+      gender?: 'MALE' | 'FEMALE' | 'OTHER' | 'PREFER_NOT_TO_SAY'
+      bloodGroup?: string
+      allergies?: string[]
+      weight?: number
+      height?: number
+    },
+  ) {
+    return this.authService.updateProfile(userId, dto)
   }
 }

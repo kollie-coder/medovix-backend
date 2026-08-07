@@ -10,6 +10,7 @@ import { HospitalsModule } from './hospitals/hospitals.module';
 import { RemindersModule } from './reminders/reminders.module';
 import { PushTokensModule } from './push-tokens/push-tokens.module';
 import { DietaryModule } from './dietary/dietary.module'
+import { NotificationPreferencesModule } from './notification-preferences/notification-preferences.module'
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DietaryModule } from './dietary/dietary.module'
     AuthModule,
     HospitalsModule,
     RemindersModule,
+    NotificationPreferencesModule,
     DietaryModule,
     PushTokensModule,
   ],

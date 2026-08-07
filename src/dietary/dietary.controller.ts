@@ -1,3 +1,4 @@
+// src/dietary/dietary.controller.ts
 import {
   Controller, Get, Post, Put, Delete,
   Body, Param, Query, UseGuards,
@@ -65,6 +66,42 @@ export class DietaryController {
     @Query('condition') condition?: string,
   ) {
     return this.dietaryService.searchFood(query, condition)
+  }
+
+  // GET /api/v1/dietary/food/search-fallback?q=ofada+rice
+  // Searches Open Food Facts when our DB has no results
+  @Get('food/search-fallback')
+  searchFoodFallback(@Query('q') query: string) {
+    return this.dietaryService.searchFoodFallback(query)
+  }
+
+  // POST /api/v1/dietary/estimate-nutrition
+  // Estimates nutrition using Claude AI or Open Food Facts fallback
+  @Post('estimate-nutrition')
+  estimateNutrition(
+    @Body('foodName') foodName: string,
+    @Body('portionGrams') portionGrams?: number,
+  ) {
+    return this.dietaryService.estimateNutrition(foodName, portionGrams ?? 100)
+  }
+  @Post('log/custom')
+  logCustomFood(
+    @CurrentUser('id') userId: string,
+    @Body() dto: {
+      name: string
+      mealType: MealType
+      calories: number
+      carbs: number
+      protein: number
+      fat: number
+      portionGrams: number
+      date?: string
+    },
+  ) {
+    return this.dietaryService.logCustomFood(userId, {
+      ...dto,
+      date: dto.date ?? new Date().toISOString().split('T')[0],
+    })
   }
 
   // POST /api/v1/dietary/log
