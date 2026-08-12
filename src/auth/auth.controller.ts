@@ -23,15 +23,12 @@ export class AuthController {
     return this.authService.login(dto)
   }
 
-  @Post('google')
+  @Post('google/native')
   @HttpCode(200)
-  googleAuth(
-    @Body('code') code: string,
-    @Body('codeVerifier') codeVerifier: string,
-    @Body('redirectUri') redirectUri: string,
-  ) {
-    return this.authService.googleAuth(code, codeVerifier, redirectUri)
+  googleAuthNative(@Body('idToken') idToken: string) {
+    return this.authService.googleAuthNative(idToken)
   }
+ 
 
   @Post('refresh')
   @HttpCode(200)
@@ -61,6 +58,31 @@ export class AuthController {
   ) {
     return this.authService.changePassword(userId, dto)
   }
+
+@Post('forgot-password')
+@HttpCode(200)
+requestPasswordReset(@Body('email') email: string) {
+  return this.authService.requestPasswordReset(email)
+}
+ 
+@Post('verify-reset-code')
+@HttpCode(200)
+verifyResetCode(
+  @Body('email') email: string,
+  @Body('code') code: string,
+) {
+  return this.authService.verifyResetCode(email, code)
+}
+ 
+@Post('reset-password')
+@HttpCode(200)
+resetPassword(
+  @Body('email') email: string,
+  @Body('code') code: string,
+  @Body('newPassword') newPassword: string,
+) {
+  return this.authService.resetPassword(email, code, newPassword)
+}
   
   @Post('2fa/setup')
   @UseGuards(JwtAuthGuard)

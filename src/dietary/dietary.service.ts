@@ -60,15 +60,29 @@ const ACTIVITY_MULTIPLIERS: Record<string, number> = {
 export class DietaryService {
   constructor(private prisma: PrismaService) {}
 
-  // ── Get or create diet profile ─────────────────────────
-  async getProfile(userId: string) {
+  private async getOrCreateProfile(userId: string) {
     let profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
     if (!profile) {
-      profile = await this.prisma.dietProfile.create({ data: { userId } })
+      // Use upsert instead of plain create — if two requests race to create
+      // the profile at the same instant (exactly what was happening before),
+      // upsert makes this safe: whichever request "wins" creates the row,
+      // and the other just returns the same row instead of erroring on a
+      // duplicate unique constraint violation.
+      profile = await this.prisma.dietProfile.upsert({
+        where: { userId },
+        update: {},
+        create: { userId },
+      })
     }
-    const targets = CONDITION_TARGETS[profile.condition]
-    return { ...profile, conditionGuidance: targets.notes }
+    return profile
   }
+
+  // ── Get or create diet profile ─────────────────────────
+  async getProfile(userId: string) {
+  const profile = await this.getOrCreateProfile(userId)
+  const targets = CONDITION_TARGETS[profile.condition]
+  return { ...profile, conditionGuidance: targets.notes }
+}
 
   // ── Update diet profile ────────────────────────────────
   async updateProfile(userId: string, dto: {
@@ -106,74 +120,72 @@ export class DietaryService {
     })
   }
 
-  // ── Get daily summary ──────────────────────────────────
+  // ── Get daily summary 
   async getDailySummary(userId: string, date: string) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
-
-    const logs = await this.prisma.foodLog.findMany({
-      where: { dietProfileId: profile.id, date },
-      include: { foodItem: true },
-      orderBy: { loggedAt: 'asc' },
-    })
-
-    const totals = logs.reduce((acc, log) => ({
-      calories: acc.calories + log.calories,
-      carbs: acc.carbs + log.carbs,
-      protein: acc.protein + log.protein,
-      fat: acc.fat + log.fat,
-    }), { calories: 0, carbs: 0, protein: 0, fat: 0 })
-
+  const profile = await this.getOrCreateProfile(userId)
+ 
+  const logs = await this.prisma.foodLog.findMany({
+    where: { dietProfileId: profile.id, date },
+    include: { foodItem: true },
+    orderBy: { loggedAt: 'asc' },
+  })
+ 
+  const totals = logs.reduce((acc, log) => ({
+    calories: acc.calories + log.calories,
+    carbs: acc.carbs + log.carbs,
+    protein: acc.protein + log.protein,
+    fat: acc.fat + log.fat,
+  }), { calories: 0, carbs: 0, protein: 0, fat: 0 })
+ 
+  return {
+    date,
+    totals,
+    targets: {
+      calories: profile.dailyCalories,
+      carbs: profile.dailyCarbs,
+      protein: profile.dailyProtein,
+      fat: profile.dailyFat,
+      water: profile.dailyWater,
+    },
+    byMeal: {
+      BREAKFAST: logs.filter(l => l.mealType === 'BREAKFAST'),
+      LUNCH: logs.filter(l => l.mealType === 'LUNCH'),
+      DINNER: logs.filter(l => l.mealType === 'DINNER'),
+      SNACK: logs.filter(l => l.mealType === 'SNACK'),
+    },
+    adherencePercent: Math.min(
+      Math.round((totals.calories / profile.dailyCalories) * 100), 100
+    ),
+  }
+}
+ 
+//  getWeeklySummary — same fix 
+async getWeeklySummary(userId: string, startDate: string) {
+  const profile = await this.getOrCreateProfile(userId)
+ 
+  const start = new Date(startDate)
+  const days = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(start)
+    d.setDate(start.getDate() + i)
+    return d.toISOString().split('T')[0]
+  })
+ 
+  const logs = await this.prisma.foodLog.findMany({
+    where: { dietProfileId: profile.id, date: { in: days } },
+  })
+ 
+  return days.map(date => {
+    const dayLogs = logs.filter(l => l.date === date)
+    const calories = dayLogs.reduce((sum, l) => sum + l.calories, 0)
     return {
       date,
-      totals,
-      targets: {
-        calories: profile.dailyCalories,
-        carbs: profile.dailyCarbs,
-        protein: profile.dailyProtein,
-        fat: profile.dailyFat,
-        water: profile.dailyWater,
-      },
-      byMeal: {
-        BREAKFAST: logs.filter(l => l.mealType === 'BREAKFAST'),
-        LUNCH: logs.filter(l => l.mealType === 'LUNCH'),
-        DINNER: logs.filter(l => l.mealType === 'DINNER'),
-        SNACK: logs.filter(l => l.mealType === 'SNACK'),
-      },
-      adherencePercent: Math.min(
-        Math.round((totals.calories / profile.dailyCalories) * 100), 100
-      ),
+      calories: Math.round(calories),
+      target: profile.dailyCalories,
+      logged: dayLogs.length > 0,
+      adherencePercent: Math.min(Math.round((calories / profile.dailyCalories) * 100), 100),
     }
-  }
-
-  // ── Get weekly summary ─────────────────────────────────
-  async getWeeklySummary(userId: string, startDate: string) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
-
-    const start = new Date(startDate)
-    const days = Array.from({ length: 7 }, (_, i) => {
-      const d = new Date(start)
-      d.setDate(start.getDate() + i)
-      return d.toISOString().split('T')[0]
-    })
-
-    const logs = await this.prisma.foodLog.findMany({
-      where: { dietProfileId: profile.id, date: { in: days } },
-    })
-
-    return days.map(date => {
-      const dayLogs = logs.filter(l => l.date === date)
-      const calories = dayLogs.reduce((sum, l) => sum + l.calories, 0)
-      return {
-        date,
-        calories: Math.round(calories),
-        target: profile.dailyCalories,
-        logged: dayLogs.length > 0,
-        adherencePercent: Math.min(Math.round((calories / profile.dailyCalories) * 100), 100),
-      }
-    })
-  }
+  })
+}
 
   // ── Log a food item ────────────────────────────────────
   async logFood(userId: string, dto: {
@@ -293,74 +305,73 @@ export class DietaryService {
 
   // ── Get meal suggestions ───────────────────────────────
   async getMealSuggestions(userId: string) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
-
-    const condition = profile.condition
-
-    const allFoods = await this.prisma.foodItem.findMany({
-      where: { suitableFor: { has: condition } },
-    })
-
-    const suitableFoods = allFoods.filter(f => !f.avoidFor.includes(condition))
-
-    const today = new Date()
-    const dayOfYear = Math.floor(
-      (today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) /
-      (1000 * 60 * 60 * 24)
+  const profile = await this.getOrCreateProfile(userId)
+ 
+  const condition = profile.condition
+ 
+  const allFoods = await this.prisma.foodItem.findMany({
+    where: { suitableFor: { has: condition } },
+  })
+ 
+  const suitableFoods = allFoods.filter(f => !f.avoidFor.includes(condition))
+ 
+  const today = new Date()
+  const dayOfYear = Math.floor(
+    (today.getTime() - new Date(today.getFullYear(), 0, 0).getTime()) /
+    (1000 * 60 * 60 * 24)
+  )
+ 
+  const getByCategory = (category: string, count: number) => {
+    const items = suitableFoods.filter(f => f.category === category)
+    if (items.length === 0) return []
+    return Array.from({ length: count }, (_, i) =>
+      items[(dayOfYear + i) % items.length]
     )
-
-    const getByCategory = (category: string, count: number) => {
-      const items = suitableFoods.filter(f => f.category === category)
-      if (items.length === 0) return []
-      return Array.from({ length: count }, (_, i) =>
-        items[(dayOfYear + i) % items.length]
-      )
-    }
-
-    return {
-      condition,
-      conditionGuidance: CONDITION_TARGETS[condition].notes,
-      date: today.toISOString().split('T')[0],
-      meals: {
-        BREAKFAST: {
-          label: 'Breakfast',
-          targetCalories: Math.round(profile.dailyCalories * 0.25),
-          suggestions: [
-            ...getByCategory('Grains', 1),
-            ...getByCategory('Protein', 1),
-            ...getByCategory('Fruits', 1),
-          ].filter(Boolean),
-        },
-        LUNCH: {
-          label: 'Lunch',
-          targetCalories: Math.round(profile.dailyCalories * 0.35),
-          suggestions: [
-            ...getByCategory('Grains', 1),
-            ...getByCategory('Protein', 2),
-            ...getByCategory('Vegetables', 2),
-          ].filter(Boolean),
-        },
-        DINNER: {
-          label: 'Dinner',
-          targetCalories: Math.round(profile.dailyCalories * 0.30),
-          suggestions: [
-            ...getByCategory('Grains', 1),
-            ...getByCategory('Protein', 1),
-            ...getByCategory('Vegetables', 2),
-          ].filter(Boolean),
-        },
-        SNACK: {
-          label: 'Snacks',
-          targetCalories: Math.round(profile.dailyCalories * 0.10),
-          suggestions: [
-            ...getByCategory('Fruits', 1),
-            ...getByCategory('Nuts & Seeds', 1),
-          ].filter(Boolean),
-        },
-      },
-    }
   }
+ 
+  return {
+    condition,
+    conditionGuidance: CONDITION_TARGETS[condition].notes,
+    date: today.toISOString().split('T')[0],
+    meals: {
+      BREAKFAST: {
+        label: 'Breakfast',
+        targetCalories: Math.round(profile.dailyCalories * 0.25),
+        suggestions: [
+          ...getByCategory('Grains', 1),
+          ...getByCategory('Protein', 1),
+          ...getByCategory('Fruits', 1),
+        ].filter(Boolean),
+      },
+      LUNCH: {
+        label: 'Lunch',
+        targetCalories: Math.round(profile.dailyCalories * 0.35),
+        suggestions: [
+          ...getByCategory('Grains', 1),
+          ...getByCategory('Protein', 2),
+          ...getByCategory('Vegetables', 2),
+        ].filter(Boolean),
+      },
+      DINNER: {
+        label: 'Dinner',
+        targetCalories: Math.round(profile.dailyCalories * 0.30),
+        suggestions: [
+          ...getByCategory('Grains', 1),
+          ...getByCategory('Protein', 1),
+          ...getByCategory('Vegetables', 2),
+        ].filter(Boolean),
+      },
+      SNACK: {
+        label: 'Snacks',
+        targetCalories: Math.round(profile.dailyCalories * 0.10),
+        suggestions: [
+          ...getByCategory('Fruits', 1),
+          ...getByCategory('Nuts & Seeds', 1),
+        ].filter(Boolean),
+      },
+    },
+  }
+}
 
   // ── Seed food database ─────────────────────────────────
   async seedFoodDatabase() {

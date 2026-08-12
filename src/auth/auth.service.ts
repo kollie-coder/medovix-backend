@@ -13,6 +13,7 @@ import { LoginDto } from './dto/login.dto'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { Role } from '@prisma/client'
+import { EmailService } from '../email/email.service'
 
 import { generateSecret, generate, verify, generateURI } from 'otplib'
 import * as qrcode from 'qrcode'
@@ -22,6 +23,7 @@ export class AuthService {
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
+    private emailService: EmailService,
   ) {}
 
   // ── Register ────────────────────────────────────────────
@@ -166,49 +168,31 @@ async completeLogin2FA(pendingToken: string, code: string) {
 }
 
 // ── Google OAuth ─────────────────────────────────────────
-async googleAuth(code: string, codeVerifier: string, redirectUri: string) {
-  // Exchange authorization code for tokens
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      code,
-      client_id: process.env.GOOGLE_CLIENT_ID as string,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET as string,
-      redirect_uri: redirectUri,
-      grant_type: 'authorization_code',
-      code_verifier: codeVerifier,
-    }).toString(),
-  })
- 
-  if (!tokenResponse.ok) {
-    const err = await tokenResponse.json()
-    console.error('Google token exchange error:', err)
-    throw new UnauthorizedException('Failed to exchange Google authorization code')
-  }
- 
-  const { access_token } = await tokenResponse.json()
- 
-  // Get user info using access token
-  const userInfoResponse = await fetch(
-    'https://www.googleapis.com/oauth2/v3/userinfo',
-    { headers: { Authorization: `Bearer ${access_token}` } }
+async googleAuthNative(idToken: string) {
+  const response = await fetch(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`
   )
  
-  if (!userInfoResponse.ok) {
-    throw new UnauthorizedException('Failed to get Google user info')
+  if (!response.ok) {
+    throw new UnauthorizedException('Invalid Google token')
   }
  
-  const { email, given_name, family_name, picture, sub: googleId } = await userInfoResponse.json()
+  const googleUser = await response.json()
+ 
+  const expectedAudience = process.env.GOOGLE_CLIENT_ID
+  if (googleUser.aud !== expectedAudience) {
+    throw new UnauthorizedException('Google token was not issued for this app')
+  }
+ 
+  const { email, given_name, family_name, picture } = googleUser
  
   if (!email) throw new UnauthorizedException('Google account has no email')
  
-  // Find or create user
   let user = await this.prisma.user.findUnique({
     where: { email },
     select: {
-      id: true, email: true, firstName: true,
-      lastName: true, role: true, hospitalId: true, active: true,
+      id: true, email: true, firstName: true, lastName: true,
+      role: true, hospitalId: true, active: true,
     },
   })
  
@@ -224,7 +208,7 @@ async googleAuth(code: string, codeVerifier: string, redirectUri: string) {
         email,
         firstName: given_name ?? 'User',
         lastName: family_name ?? '',
-        passwordHash: await bcrypt.hash(googleId, 12),
+        passwordHash: await bcrypt.hash(email + Date.now(), 12),
         role: Role.PUBLIC,
         avatar: picture ?? null,
         emailVerified: true,
@@ -358,6 +342,155 @@ async changePassword(userId: string, dto: {
  
   return { message: 'Password changed successfully' }
 }  
+
+
+// ── Request password reset — sends a 6-digit code by email ──
+async requestPasswordReset(email: string) {
+  const user = await this.prisma.user.findUnique({
+    where: { email },
+    select: { id: true, email: true, firstName: true },
+  })
+ 
+  console.log('Password reset requested for:', email, '| User found:', !!user)
+ 
+  if (!user) {
+    return { message: 'If an account exists with this email, a reset code has been sent.' }
+  }
+ 
+  const recentToken = await this.prisma.passwordResetToken.findFirst({
+    where: {
+      userId: user.id,
+      createdAt: { gt: new Date(Date.now() - 60 * 1000) },
+    },
+    orderBy: { createdAt: 'desc' },
+  })
+  console.log('Recent token within 60s:', !!recentToken)
+ 
+  if (recentToken) {
+    console.log('BLOCKED by 60s cooldown')
+    return { message: 'If an account exists with this email, a reset code has been sent.' }
+  }
+ 
+  const todayCount = await this.prisma.passwordResetToken.count({
+    where: {
+      userId: user.id,
+      createdAt: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    },
+  })
+  console.log('Reset requests in last 24h:', todayCount)
+ 
+  if (todayCount >= 5) {
+    console.log('BLOCKED by daily cap')
+    return { message: 'If an account exists with this email, a reset code has been sent.' }
+  }
+ 
+  const code = crypto.randomInt(100000, 999999).toString()
+  console.log('Generated code:', code)
+  const hashedCode = await bcrypt.hash(code, 10)
+ 
+  const expiresAt = new Date()
+  expiresAt.setMinutes(expiresAt.getMinutes() + 15)
+ 
+  await this.prisma.passwordResetToken.updateMany({
+    where: { userId: user.id, used: false },
+    data: { used: true },
+  })
+ 
+  await this.prisma.passwordResetToken.create({
+    data: {
+      userId: user.id,
+      code: hashedCode,
+      expiresAt,
+    },
+  })
+  console.log('Token saved to database')
+ 
+  try {
+    console.log('Attempting to send email via Brevo...')
+    await this.emailService.sendPasswordResetCode(user.email, user.firstName, code)
+    console.log('Email sent successfully')
+  } catch (err) {
+    console.error('Failed to send reset email:', err)
+  }
+ 
+  return { message: 'If an account exists with this email, a reset code has been sent.' }
+}
+ 
+// ── Verify reset code (without consuming it) ─────────────────
+// Optional — lets the mobile app check a code is valid before
+// showing the "set new password" screen, without using it up
+async verifyResetCode(email: string, code: string) {
+  const user = await this.prisma.user.findUnique({
+    where: { email },
+    select: { id: true },
+  })
+ 
+  if (!user) throw new BadRequestException('Invalid or expired code')
+ 
+  const tokens = await this.prisma.passwordResetToken.findMany({
+    where: { userId: user.id, used: false, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  })
+ 
+  for (const token of tokens) {
+    const matches = await bcrypt.compare(code, token.code)
+    if (matches) return { valid: true }
+  }
+ 
+  throw new BadRequestException('Invalid or expired code')
+}
+ 
+// ── Complete password reset ──────────────────────────────────
+async resetPassword(email: string, code: string, newPassword: string) {
+  if (newPassword.length < 8) {
+    throw new BadRequestException('Password must be at least 8 characters')
+  }
+ 
+  const user = await this.prisma.user.findUnique({
+    where: { email },
+    select: { id: true },
+  })
+ 
+  if (!user) throw new BadRequestException('Invalid or expired code')
+ 
+  const tokens = await this.prisma.passwordResetToken.findMany({
+    where: { userId: user.id, used: false, expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  })
+ 
+  let matchedToken: typeof tokens[number] | null = null
+  for (const token of tokens) {
+    const matches = await bcrypt.compare(code, token.code)
+    if (matches) {
+      matchedToken = token
+      break
+    }
+  }
+ 
+  if (!matchedToken) {
+    throw new BadRequestException('Invalid or expired code')
+  }
+ 
+  const newHash = await bcrypt.hash(newPassword, 12)
+ 
+  await this.prisma.$transaction([
+    this.prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash: newHash },
+    }),
+    this.prisma.passwordResetToken.update({
+      where: { id: matchedToken.id },
+      data: { used: true },
+    }),
+    // Revoke all sessions — force re-login everywhere after a password reset
+    this.prisma.refreshToken.updateMany({
+      where: { userId: user.id },
+      data: { revoked: true },
+    }),
+  ])
+ 
+  return { message: 'Password reset successfully. Please log in with your new password.' }
+}
 
 
 // ── 2FA: Generate setup (secret + QR code) ─────────────────
