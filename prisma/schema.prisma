@@ -271,6 +271,8 @@ model User {
 
   notificationPreferences NotificationPreferences?
 
+  passwordResetTokens PasswordResetToken[]
+
   dietProfile      DietProfile?
 
   // Appointments
@@ -288,6 +290,18 @@ model User {
   @@index([role])
   @@index([email])
   @@index([hospitalId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  code      String   // 6-digit code, hashed
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 // ── Hospital ↔ Patient junction ────────────────────────────
