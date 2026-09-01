@@ -1,6 +1,7 @@
 // src/auth/auth.service.ts
 import {
   Injectable,
+  Logger,
   UnauthorizedException,
   ConflictException,
   NotFoundException,  
@@ -20,6 +21,7 @@ import * as qrcode from 'qrcode'
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name)
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
@@ -351,8 +353,6 @@ async requestPasswordReset(email: string) {
     select: { id: true, email: true, firstName: true },
   })
  
-  console.log('Password reset requested for:', email, '| User found:', !!user)
- 
   if (!user) {
     return { message: 'If an account exists with this email, a reset code has been sent.' }
   }
@@ -364,10 +364,8 @@ async requestPasswordReset(email: string) {
     },
     orderBy: { createdAt: 'desc' },
   })
-  console.log('Recent token within 60s:', !!recentToken)
  
   if (recentToken) {
-    console.log('BLOCKED by 60s cooldown')
     return { message: 'If an account exists with this email, a reset code has been sent.' }
   }
  
@@ -377,15 +375,12 @@ async requestPasswordReset(email: string) {
       createdAt: { gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     },
   })
-  console.log('Reset requests in last 24h:', todayCount)
  
   if (todayCount >= 5) {
-    console.log('BLOCKED by daily cap')
     return { message: 'If an account exists with this email, a reset code has been sent.' }
   }
  
   const code = crypto.randomInt(100000, 999999).toString()
-  console.log('Generated code:', code)
   const hashedCode = await bcrypt.hash(code, 10)
  
   const expiresAt = new Date()
@@ -403,14 +398,11 @@ async requestPasswordReset(email: string) {
       expiresAt,
     },
   })
-  console.log('Token saved to database')
  
   try {
-    console.log('Attempting to send email via Brevo...')
     await this.emailService.sendPasswordResetCode(user.email, user.firstName, code)
-    console.log('Email sent successfully')
   } catch (err) {
-    console.error('Failed to send reset email:', err)
+    this.logger.error(`Failed to send password reset email to user ${user.id}`, err)
   }
  
   return { message: 'If an account exists with this email, a reset code has been sent.' }

@@ -1,5 +1,5 @@
 // src/hospitals/hospitals.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 
 // In-memory cache: key = rounded lat,lng,radius -> { data, expiresAt }
@@ -10,6 +10,8 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 @Injectable()
 export class HospitalsService {
+  private readonly logger = new Logger(HospitalsService.name)
+  
   constructor(private prisma: PrismaService) {}
 
   // ── Search Medovix hospitals ─────────────────────────────
@@ -93,7 +95,6 @@ export class HospitalsService {
     let googleHospitals: any[]
 
     if (cached && cached.expiresAt > Date.now()) {
-      console.log('Returning cached nearby results for', cacheKey)
       googleHospitals = cached.data
     } else {
       googleHospitals = await this.queryGooglePlacesNearby(lat, lng, radiusKm)
@@ -150,7 +151,6 @@ export class HospitalsService {
   async getPlaceFullDetails(placeId: string) {
     const cached = detailsCache.get(placeId)
     if (cached && cached.expiresAt > Date.now()) {
-      console.log('Returning cached details for', placeId)
       return cached.data
     }
 
@@ -215,16 +215,12 @@ export class HospitalsService {
       `&type=hospital` +
       `&key=${key}`
 
-    console.log('Querying Google Places nearby (1 API call)...')
-
     try {
       const response = await fetch(url)
       const data = await response.json()
 
-      console.log('Google Places status:', data.status, '| results:', data.results?.length)
-
       if (data.status !== 'OK' && data.status !== 'ZERO_RESULTS') {
-        console.error('Google Places error:', data.error_message)
+        this.logger.warn(`Google Places nearby search returned status: ${data.status}`)
         return []
       }
 
@@ -251,7 +247,7 @@ export class HospitalsService {
         emergency: false,
       })).filter((h: any) => h.lat && h.lng)
     } catch (err) {
-      console.error('Google Places fetch error:', err)
+      this.logger.error('Google Places nearby search failed', err)
       return []
     }
   }
@@ -266,14 +262,12 @@ export class HospitalsService {
       `&fields=${fields}` +
       `&key=${key}`
 
-    console.log('Fetching place details (1 API call) for', placeId)
-
     try {
       const response = await fetch(url)
       const data = await response.json()
 
       if (data.status !== 'OK') {
-        console.error('Place Details error:', data.status, data.error_message)
+        this.logger.warn(`Google Place Details returned status: ${data.status} for placeId ${placeId}`)
         return null
       }
 
@@ -298,7 +292,7 @@ export class HospitalsService {
         photos,
       }
     } catch (err) {
-      console.error('Place Details fetch error:', err)
+      this.logger.error(`Google Place Details fetch failed for placeId ${placeId}`, err)
       return null
     }
   }

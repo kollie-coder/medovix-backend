@@ -11,6 +11,7 @@ import { RemindersModule } from './reminders/reminders.module';
 import { PushTokensModule } from './push-tokens/push-tokens.module';
 import { DietaryModule } from './dietary/dietary.module'
 import { NotificationPreferencesModule } from './notification-preferences/notification-preferences.module'
+import { NotificationsModule } from './notifications/notifications.module'
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { NotificationPreferencesModule } from './notification-preferences/notifi
     NotificationPreferencesModule,
     DietaryModule,
     PushTokensModule,
+    NotificationsModule
   ],
   controllers: [AppController],
   providers: [

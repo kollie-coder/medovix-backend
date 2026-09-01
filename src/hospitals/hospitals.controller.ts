@@ -49,35 +49,3 @@ export class HospitalsController {
     return this.hospitalsService.findOne(id)
   }
 }
-
-
-// // src/hospitals/hospitals.controller.ts
-// import { Controller, Get, Param, Query } from '@nestjs/common'
-// import { HospitalsService } from './hospitals.service'
-
-// @Controller('hospitals')
-// export class HospitalsController {
-//   constructor(private hospitalsService: HospitalsService) {}
-
-//   // GET /api/v1/hospitals?search=lagos&type=general&verified=true
-//   @Get()
-//   findAll(
-//     @Query('search') search?: string,
-//     @Query('city') city?: string,
-//     @Query('state') state?: string,
-//     @Query('type') type?: string,
-//     @Query('verified') verified?: string,
-//     @Query('page') page?: string,
-//     @Query('limit') limit?: string,
-//   ) {
-//     return this.hospitalsService.findAll({
-//       search, city, state, type, verified, page, limit,
-//     })
-//   }
-
-//   // GET /api/v1/hospitals/:id
-//   @Get(':id')
-//   findOne(@Param('id') id: string) {
-//     return this.hospitalsService.findOne(id)
-//   }
-// }

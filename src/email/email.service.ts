@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common'
+import { Injectable, Logger } from '@nestjs/common'
 
 @Injectable()
 export class EmailService {
+  private readonly logger = new Logger(EmailService.name)
+
   private readonly apiKey = process.env.BREVO_API_KEY
   private readonly senderEmail = process.env.BREVO_SENDER_EMAIL ?? 'noreply@medovix.com'
   private readonly senderName = process.env.BREVO_SENDER_NAME ?? 'Medovix'
@@ -50,13 +52,13 @@ export class EmailService {
 
       if (!response.ok) {
         const err = await response.text()
-        console.error('Brevo email error:', err)
+        this.logger.error(`Brevo API rejected email to ${toEmail}: ${err}`)
         throw new Error('Failed to send email')
       }
 
       return true
     } catch (err) {
-      console.error('Email send error:', err)
+      this.logger.error(`Failed to send password reset email to ${toEmail}`, err)
       throw err
     }
   }
