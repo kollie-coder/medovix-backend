@@ -1,5 +1,5 @@
 // src/dietary/dietary.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { HealthCondition, ActivityLevel, MealType } from '@prisma/client'
 
@@ -58,6 +58,7 @@ const ACTIVITY_MULTIPLIERS: Record<string, number> = {
 
 @Injectable()
 export class DietaryService {
+  private readonly logger = new Logger(DietaryService.name)
   constructor(private prisma: PrismaService) {}
 
   private async getOrCreateProfile(userId: string) {
@@ -494,7 +495,7 @@ async getWeeklySummary(userId: string, startDate: string) {
           imageUrl: p.image_url ?? null,
         }))
     } catch (err) {
-      console.error('Open Food Facts error:', err)
+      this.logger.error('Open Food Facts lookup failed', err)
       return []
     }
   }
@@ -548,15 +549,12 @@ async getWeeklySummary(userId: string, startDate: string) {
 
   // ── Nutrition estimation (own DB first, then AI, then Open Food Facts) ──
   async estimateNutrition(foodName: string, portionGrams: number = 100) {
-    console.log('=== Estimate nutrition for:', foodName, '===')
-
+    
     const ownMatches = await this.searchFood(foodName)
-    console.log('Own DB matches:', ownMatches.length)
-
+    
     if (ownMatches.length > 0) {
       const best = ownMatches[0]
       const factor = portionGrams / 100
-      console.log('Own DB best match:', best.name)
       return {
         foodName, portionGrams,
         calories: Math.round(best.calories * factor),
@@ -571,17 +569,15 @@ async getWeeklySummary(userId: string, startDate: string) {
     }
 
     const apiKey = process.env.ANTHROPIC_API_KEY
-    console.log('Claude API key present:', !!apiKey)
     if (apiKey) {
       try {
         const result = await this.estimateWithClaude(foodName, portionGrams, apiKey)
         if (result) return result
       } catch (err) {
-        console.error('Claude estimation failed, falling back to Open Food Facts:', err)
+        this.logger.warn('Claude estimation failed, using fallback', err)
       }
     }
 
-    console.log('Falling through to Open Food Facts...')
     return this.estimateWithOpenFoodFacts(foodName, portionGrams)
   }
 
@@ -642,23 +638,19 @@ Base your estimates on typical Nigerian/African or international food data.`,
     }
 
     try {
-      console.log('OFF estimate URL:', searchUrl)
       let response = await fetch(searchUrl, { headers })
-      console.log('OFF estimate status:', response.status)
-
+     
       // Retry up to 2 times on transient 503s
       let attempts = 0
       while (!response.ok && attempts < 2) {
         attempts++
         await new Promise(r => setTimeout(r, 800 * attempts))
         response = await fetch(searchUrl, { headers })
-        console.log(`OFF estimate retry ${attempts} status:`, response.status)
       }
 
       if (!response.ok) throw new Error(`Open Food Facts unavailable (${response.status})`)
 
       const data = await response.json()
-      console.log('OFF estimate products count:', data.products?.length)
 
       const productsRaw = data.products ?? data.hits ?? []
 
@@ -671,8 +663,6 @@ Base your estimates on typical Nigerian/African or international food data.`,
         const name = p.product_name.toLowerCase()
         return searchWords.some((w: string) => name.includes(w))
       })
-
-      console.log('OFF estimate filtered count:', products.length)
 
       if (products.length === 0) {
         return {
@@ -717,8 +707,6 @@ Base your estimates on typical Nigerian/African or international food data.`,
       scored.sort((a: any, b: any) => b.score - a.score)
       const best = scored[0].product
 
-      console.log('OFF estimate best match:', best.product_name, 'score:', scored[0].score)
-
       const factor = portionGrams / 100
 
       return {
@@ -732,7 +720,7 @@ Base your estimates on typical Nigerian/African or international food data.`,
         disclaimer: `Values from Open Food Facts based on "${best.product_name}". Please verify and edit if needed.`,
       }
     } catch (err) {
-      console.error('OFF estimate error:', err)
+      this.logger.error('Open Food Facts nutrition estimate failed', err)
       return {
         foodName, portionGrams, calories: 0, carbs: 0, protein: 0, fat: 0,
         source: 'unknown' as const, confidence: 'none' as const,

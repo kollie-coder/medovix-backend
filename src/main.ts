@@ -1,9 +1,10 @@
 import { NestFactory } from '@nestjs/core'
 import { AppModule } from './app.module'
-import { ValidationPipe } from '@nestjs/common'
+import { ValidationPipe, Logger } from '@nestjs/common'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule)
+  const logger = new Logger('Bootstrap')
 
   app.setGlobalPrefix('api/v1')
 
@@ -17,21 +18,9 @@ async function bootstrap() {
     new ValidationPipe({ whitelist: true, transform: true })
   )
 
-  await app.listen(process.env.PORT || 3001)
-  console.log(`Medovix API running on http://localhost:3001/api/v1`)
+  const port = process.env.PORT || 3001
+  await app.listen(port)
+
+  logger.log(`Medovix API running on port ${port}`)
 }
 bootstrap()
-
-
-
-// import { NestFactory } from '@nestjs/core';
-// import { AppModule } from './app.module';
-
-// async function bootstrap() {
-//   const app = await NestFactory.create(AppModule);
-//   app.setGlobalPrefix('api/v1');
-//   await app.listen(process.env.PORT || 3001);
-//   console.log(`Medovix API running on http://localhost:3001/api/v1`);
-// }
-// bootstrap();
-
