@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common'
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common'
 import { ConfigModule } from '@nestjs/config'
 import { APP_PIPE } from '@nestjs/core'
 import { ValidationPipe } from '@nestjs/common'
@@ -12,6 +12,7 @@ import { PushTokensModule } from './push-tokens/push-tokens.module';
 import { DietaryModule } from './dietary/dietary.module'
 import { NotificationPreferencesModule } from './notification-preferences/notification-preferences.module'
 import { NotificationsModule } from './notifications/notifications.module'
+import { LoggingMiddleware } from './common/middleware/logging.middleware'
 
 @Module({
   imports: [
@@ -34,4 +35,8 @@ import { NotificationsModule } from './notifications/notifications.module'
     },
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(LoggingMiddleware).forRoutes('*')
+  }
+}
