@@ -5,19 +5,19 @@ export class EmailService {
   private readonly logger = new Logger(EmailService.name)
 
   private readonly apiKey = process.env.BREVO_API_KEY
-  private readonly senderEmail = process.env.BREVO_SENDER_EMAIL ?? 'noreply@medovix.com'
-  private readonly senderName = process.env.BREVO_SENDER_NAME ?? 'Medovix'
+  private readonly senderEmail = process.env.BREVO_SENDER_EMAIL ?? 'noreply@medovite.com'
+  private readonly senderName = process.env.BREVO_SENDER_NAME ?? 'Medovite'
 
   async sendPasswordResetCode(toEmail: string, toName: string, code: string) {
     const html = `
       <div style="font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px;">
-        <h1 style="color: #0A7EA4; font-size: 22px; margin-bottom: 4px;">Medovix</h1>
+        <h1 style="color: #0A7EA4; font-size: 22px; margin-bottom: 4px;">Medovite</h1>
         <p style="color: #6B7280; font-size: 13px; margin-top: 0; margin-bottom: 24px;">Healthcare Platform</p>
 
         <h2 style="color: #0D1117; font-size: 18px;">Reset your password</h2>
         <p style="color: #374151; font-size: 14px; line-height: 22px;">
           Hi ${toName},<br><br>
-          We received a request to reset your Medovix password. Use the code below to continue:
+          We received a request to reset your Medovite password. Use the code below to continue:
         </p>
 
         <div style="background: #F0F7FA; border: 1.5px solid #B8DFF0; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0;">
@@ -29,7 +29,7 @@ export class EmailService {
         </p>
 
         <div style="border-top: 1px solid #E5E7EB; margin-top: 32px; padding-top: 16px;">
-          <p style="color: #9CA3AF; font-size: 11px;">Medovix Healthcare Platform · This is an automated message, please do not reply.</p>
+          <p style="color: #9CA3AF; font-size: 11px;">Medovite Healthcare Platform · This is an automated message, please do not reply.</p>
         </div>
       </div>
     `
@@ -45,7 +45,7 @@ export class EmailService {
         body: JSON.stringify({
           sender: { email: this.senderEmail, name: this.senderName },
           to: [{ email: toEmail, name: toName }],
-          subject: 'Reset your Medovix password',
+          subject: 'Reset your Medovite password',
           htmlContent: html,
         }),
       })
