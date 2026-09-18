@@ -14,7 +14,7 @@ export class HospitalsService {
   
   constructor(private prisma: PrismaService) {}
 
-  // ── Search Medovix hospitals ─────────────────────────────
+  // ── Search Medovite hospitals ─────────────────────────────
   async findAll(query: {
     search?: string
     city?: string
@@ -69,7 +69,7 @@ export class HospitalsService {
               openingHours: true,
               rating: true,
               reviewCount: true,
-              medovixVerified: true,
+              medoviteVerified: true,
               emergencyAvailable: true,
               photos: true,
             },
@@ -101,7 +101,7 @@ export class HospitalsService {
       nearbyCache.set(cacheKey, { data: googleHospitals, expiresAt: Date.now() + CACHE_TTL_MS })
     }
 
-    const medovixHospitals = await this.prisma.hospital.findMany({
+    const medoviteHospitals = await this.prisma.hospital.findMany({
       where: { active: true, deletedAt: null },
       select: {
         id: true,
@@ -111,7 +111,7 @@ export class HospitalsService {
         longitude: true,
         listing: {
           select: {
-            medovixVerified: true,
+            medoviteVerified: true,
             rating: true,
             specialties: true,
             emergencyAvailable: true,
@@ -121,7 +121,7 @@ export class HospitalsService {
     })
 
     const results = googleHospitals.map((place: any) => {
-      const medovixMatch = medovixHospitals.find(m => {
+      const medoviteMatch = medoviteHospitals.find(m => {
         if (m.googlePlaceId && m.googlePlaceId === place.placeId) return true
         if (m.latitude && m.longitude) {
           const dist = this.haversineDistance(place.lat, place.lng, m.latitude, m.longitude)
@@ -133,12 +133,12 @@ export class HospitalsService {
 
       return {
         ...place,
-        medovixId: medovixMatch?.id ?? null,
-        isMedovix: !!medovixMatch,
-        medovixVerified: medovixMatch?.listing?.medovixVerified ?? false,
-        rating: medovixMatch?.listing?.rating ?? place.rating,
-        specialties: medovixMatch?.listing?.specialties ?? [],
-        emergencyAvailable: medovixMatch?.listing?.emergencyAvailable ?? false,
+        medoviteId: medoviteMatch?.id ?? null,
+        isMedovite: !!medoviteMatch,
+        medoviteVerified: medoviteMatch?.listing?.medoviteVerified ?? false,
+        rating: medoviteMatch?.listing?.rating ?? place.rating,
+        specialties: medoviteMatch?.listing?.specialties ?? [],
+        emergencyAvailable: medoviteMatch?.listing?.emergencyAvailable ?? false,
         distance: this.haversineDistance(lat, lng, place.lat, place.lng),
       }
     })
@@ -161,7 +161,7 @@ export class HospitalsService {
     return details
   }
 
-  // ── Get single Medovix hospital ──────────────────────────
+  // ── Get single Medovite hospital ──────────────────────────
   async findOne(id: string) {
     const hospital = await this.prisma.hospital.findFirst({
       where: { id, active: true, deletedAt: null },
@@ -187,7 +187,7 @@ export class HospitalsService {
             openingHours: true,
             rating: true,
             reviewCount: true,
-            medovixVerified: true,
+            medoviteVerified: true,
             emergencyAvailable: true,
             photos: true,
           },

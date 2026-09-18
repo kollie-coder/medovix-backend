@@ -503,7 +503,7 @@ async setup2FA(userId: string, userEmail: string) {
   })
  
   const otpauthUrl = generateURI({
-    issuer: 'Medovix',
+    issuer: 'Medovite',
     label: userEmail,
     secret,
   })

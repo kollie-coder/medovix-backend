@@ -20,7 +20,7 @@ enum Role {
   LAB_TECHNICIAN
   DIETICIAN
   ADMIN
-  SUPER_ADMIN  // Medovix platform admin
+  SUPER_ADMIN  // Medovite platform admin
 }
 
 enum Gender {
@@ -205,7 +205,7 @@ model HospitalListing {
   openingHours    Json?        // { mon: { open: "08:00", close: "17:00" }, ... }
   rating          Float        @default(0)
   reviewCount     Int          @default(0)
-  medovixVerified Boolean      @default(false)
+  medoviteVerified Boolean      @default(false)
   emergencyAvailable Boolean   @default(false)
   photos          String[]     @default([])
   updatedAt       DateTime     @updatedAt
