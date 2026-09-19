@@ -2,19 +2,17 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 
-// In-memory cache: key = rounded lat,lng,radius -> { data, expiresAt }
 const nearbyCache = new Map<string, { data: any[]; expiresAt: number }>()
 const detailsCache = new Map<string, { data: any; expiresAt: number }>()
 
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 @Injectable()
 export class HospitalsService {
   private readonly logger = new Logger(HospitalsService.name)
-  
+
   constructor(private prisma: PrismaService) {}
 
-  // ── Search Medovite hospitals ─────────────────────────────
   async findAll(query: {
     search?: string
     city?: string
@@ -86,17 +84,19 @@ export class HospitalsService {
     }
   }
 
-  // ── Search nearby hospitals (list view — cheap, no details calls) ──
   async findNearby(lat: number, lng: number, radiusKm: number = 5) {
-    // Round coordinates to ~1km precision for effective caching
+    this.logger.log(`DEBUG: findNearby called with lat=${lat}, lng=${lng}, radiusKm=${radiusKm}`)
+
     const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)},${radiusKm}`
     const cached = nearbyCache.get(cacheKey)
 
     let googleHospitals: any[]
 
     if (cached && cached.expiresAt > Date.now()) {
+      this.logger.log('DEBUG: using cached Google results')
       googleHospitals = cached.data
     } else {
+      this.logger.log('DEBUG: fetching fresh Google results')
       googleHospitals = await this.queryGooglePlacesNearby(lat, lng, radiusKm)
       nearbyCache.set(cacheKey, { data: googleHospitals, expiresAt: Date.now() + CACHE_TTL_MS })
     }
@@ -106,6 +106,10 @@ export class HospitalsService {
       select: {
         id: true,
         name: true,
+        type: true,
+        address: true,
+        phone: true,
+        website: true,
         googlePlaceId: true,
         latitude: true,
         longitude: true,
@@ -115,10 +119,18 @@ export class HospitalsService {
             rating: true,
             specialties: true,
             emergencyAvailable: true,
+            photos: true,
           },
         },
       },
     })
+
+    this.logger.log(`DEBUG: medoviteHospitals fetched from DB, count = ${medoviteHospitals.length}`)
+    for (const h of medoviteHospitals) {
+      this.logger.log(`DEBUG: DB hospital -> id=${h.id}, name=${h.name}, lat=${h.latitude}, lng=${h.longitude}`)
+    }
+
+    const matchedMedoviteIds = new Set<string>()
 
     const results = googleHospitals.map((place: any) => {
       const medoviteMatch = medoviteHospitals.find(m => {
@@ -127,9 +139,13 @@ export class HospitalsService {
           const dist = this.haversineDistance(place.lat, place.lng, m.latitude, m.longitude)
           return dist < 0.1
         }
-        return m.name.toLowerCase().includes(place.name.toLowerCase()) ||
-          place.name.toLowerCase().includes(m.name.toLowerCase())
+        return false
       })
+
+      if (medoviteMatch) {
+        this.logger.log(`DEBUG: matched Google place "${place.name}" to DB hospital "${medoviteMatch.name}"`)
+        matchedMedoviteIds.add(medoviteMatch.id)
+      }
 
       return {
         ...place,
@@ -143,11 +159,63 @@ export class HospitalsService {
       }
     })
 
+    this.logger.log(`DEBUG: matchedMedoviteIds after Google matching = ${JSON.stringify([...matchedMedoviteIds])}`)
+    this.logger.log('DEBUG: entering standalone-entry loop now')
+
+    for (const hospital of medoviteHospitals) {
+      this.logger.log(`DEBUG: checking hospital "${hospital.name}" (id=${hospital.id})`)
+
+      if (matchedMedoviteIds.has(hospital.id)) {
+        this.logger.log(`DEBUG: "${hospital.name}" was already matched to a Google place — skipping`)
+        continue
+      }
+
+      if (!hospital.latitude || !hospital.longitude) {
+        this.logger.log(`DEBUG: "${hospital.name}" has no coordinates (lat=${hospital.latitude}, lng=${hospital.longitude}) — skipping`)
+        continue
+      }
+
+      const distance = this.haversineDistance(lat, lng, hospital.latitude, hospital.longitude)
+      this.logger.log(`DEBUG: "${hospital.name}" distance = ${distance}km, radius limit = ${radiusKm}km`)
+
+      if (distance > radiusKm) {
+        this.logger.log(`DEBUG: "${hospital.name}" is outside the radius — skipping`)
+        continue
+      }
+
+      this.logger.log(`DEBUG: "${hospital.name}" PASSED all checks — adding as standalone entry now`)
+
+      results.push({
+        placeId: hospital.googlePlaceId ?? null,
+        medoviteId: hospital.id,
+        name: hospital.name,
+        type: hospital.type ?? 'General',
+        address: hospital.address ?? 'Address not available',
+        lat: hospital.latitude,
+        lng: hospital.longitude,
+        isOpenNow: null,
+        rating: hospital.listing?.rating ?? null,
+        userRatingsTotal: 0,
+        thumbnail: hospital.listing?.photos?.[0] ?? null,
+        phone: hospital.phone ?? null,
+        website: hospital.website ?? null,
+        openingHours: null,
+        photos: hospital.listing?.photos ?? [],
+        emergency: hospital.listing?.emergencyAvailable ?? false,
+        isMedovite: true,
+        medoviteVerified: hospital.listing?.medoviteVerified ?? false,
+        specialties: hospital.listing?.specialties ?? [],
+        emergencyAvailable: hospital.listing?.emergencyAvailable ?? false,
+        distance,
+      })
+    }
+
+    this.logger.log(`DEBUG: final results count = ${results.length}`)
+
     results.sort((a: any, b: any) => a.distance - b.distance)
     return results
   }
 
-  // ── Get full place details (called only when user taps a hospital) ──
   async getPlaceFullDetails(placeId: string) {
     const cached = detailsCache.get(placeId)
     if (cached && cached.expiresAt > Date.now()) {
@@ -161,7 +229,6 @@ export class HospitalsService {
     return details
   }
 
-  // ── Get single Medovite hospital ──────────────────────────
   async findOne(id: string) {
     const hospital = await this.prisma.hospital.findFirst({
       where: { id, active: true, deletedAt: null },
@@ -204,7 +271,6 @@ export class HospitalsService {
     return hospital
   }
 
-  // ── Google Places Nearby Search (cheap — no details) ─────
   private async queryGooglePlacesNearby(lat: number, lng: number, radiusKm: number) {
     const radiusMetres = Math.min(radiusKm * 1000, 50000)
     const key = process.env.GOOGLE_PLACES_API_KEY
@@ -224,7 +290,6 @@ export class HospitalsService {
         return []
       }
 
-      // No Place Details call here — just use what Nearby Search gives us
       return (data.results ?? []).slice(0, 20).map((place: any) => ({
         placeId: place.place_id,
         name: place.name,
@@ -235,11 +300,9 @@ export class HospitalsService {
         isOpenNow: place.opening_hours?.open_now ?? null,
         rating: place.rating ?? null,
         userRatingsTotal: place.user_ratings_total ?? 0,
-        // Single thumbnail only — cheaper than fetching all photos
         thumbnail: place.photos?.[0]
           ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=200&photo_reference=${place.photos[0].photo_reference}&key=${key}`
           : null,
-        // Phone/website/full-hours NOT fetched here — only on detail tap
         phone: null,
         website: null,
         openingHours: null,
@@ -252,7 +315,6 @@ export class HospitalsService {
     }
   }
 
-  // ── Fetch full Place Details (only called when user taps) ──
   private async fetchPlaceDetails(placeId: string) {
     const key = process.env.GOOGLE_PLACES_API_KEY
     const fields = 'place_id,name,formatted_address,formatted_phone_number,website,opening_hours,rating,photos,geometry,types,user_ratings_total'
@@ -297,12 +359,9 @@ export class HospitalsService {
     }
   }
 
-  // ── Map Google place types to our filter categories ─────
-  // Aligns with HOSPITAL_TYPES: 'General' | 'Specialist' | 'Teaching' | 'Clinic'
   private mapGoogleType(types: string[], name?: string): string {
     const lowerName = (name ?? '').toLowerCase()
 
-    // Name-based heuristics first — Google's "types" array is too generic
     if (lowerName.includes('teaching') || lowerName.includes('university')) return 'Teaching'
     if (lowerName.includes('specialist') || lowerName.includes('cardiology') ||
         lowerName.includes('cancer') || lowerName.includes('eye') ||
@@ -311,7 +370,6 @@ export class HospitalsService {
     if (lowerName.includes('clinic') || lowerName.includes('surgery') ||
         lowerName.includes('practice') || lowerName.includes('gp ')) return 'Clinic'
 
-    // Fallback to Google's types array
     if (types.includes('doctor')) return 'Clinic'
     if (types.includes('pharmacy')) return 'Clinic'
     if (types.includes('hospital')) return 'General'
@@ -319,7 +377,6 @@ export class HospitalsService {
     return 'General'
   }
 
-  // ── Haversine distance (km) ──────────────────────────────
   private haversineDistance(
     lat1: number, lng1: number,
     lat2: number, lng2: number,
