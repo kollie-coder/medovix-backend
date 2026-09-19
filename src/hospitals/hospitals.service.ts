@@ -2,10 +2,16 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 
+// In-memory cache for Google Places results only — keyed by rounded
+// coordinates + radius, so nearby requests within ~1km of each other
+// reuse the same Google API call instead of paying for a fresh one.
+// Medovite's own hospital data is NEVER cached here — it's queried
+// live on every request, since it's cheap (our own database) and
+// always needs to be fresh.
 const nearbyCache = new Map<string, { data: any[]; expiresAt: number }>()
 const detailsCache = new Map<string, { data: any; expiresAt: number }>()
 
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 @Injectable()
 export class HospitalsService {
@@ -13,6 +19,7 @@ export class HospitalsService {
 
   constructor(private prisma: PrismaService) {}
 
+  // ── Search Medovite hospitals (registered on our platform) ──
   async findAll(query: {
     search?: string
     city?: string
@@ -84,23 +91,43 @@ export class HospitalsService {
     }
   }
 
+  // ── Search nearby hospitals — blends two data sources ────────
+  //
+  // The nearby list is built from TWO sources merged together:
+  //   1. Google Places — public hospitals/clinics near the user,
+  //      even ones not registered with Medovite at all.
+  //   2. Our own database — hospitals that have actually signed
+  //      up on the Medovite platform.
+  //
+  // A Medovite hospital that also has a real Google Maps listing
+  // gets "matched" and shown as one enriched entry (Google's public
+  // info + our verified badge/rating). But a Medovite hospital with
+  // NO Google Maps presence yet (a new clinic, a small practice that
+  // hasn't been indexed by Google) would otherwise be invisible in
+  // the app — since the old version of this method only ever looped
+  // over Google's results and used our data purely to decorate them.
+  //
+  // The fix: after building the Google-based list, we separately
+  // check every Medovite hospital that DIDN'T get matched, and if
+  // it's within the search radius, add it as its own standalone
+  // entry. This guarantees every registered hospital shows up for
+  // nearby users, regardless of whether Google knows about it yet.
   async findNearby(lat: number, lng: number, radiusKm: number = 5) {
-    this.logger.log(`DEBUG: findNearby called with lat=${lat}, lng=${lng}, radiusKm=${radiusKm}`)
-
     const cacheKey = `${lat.toFixed(2)},${lng.toFixed(2)},${radiusKm}`
     const cached = nearbyCache.get(cacheKey)
 
     let googleHospitals: any[]
 
     if (cached && cached.expiresAt > Date.now()) {
-      this.logger.log('DEBUG: using cached Google results')
       googleHospitals = cached.data
     } else {
-      this.logger.log('DEBUG: fetching fresh Google results')
       googleHospitals = await this.queryGooglePlacesNearby(lat, lng, radiusKm)
       nearbyCache.set(cacheKey, { data: googleHospitals, expiresAt: Date.now() + CACHE_TTL_MS })
     }
 
+    // Fetch every active Medovite hospital — not just ones near the
+    // user — so we can check each one for a Google match OR distance.
+    // This is cheap since it's our own database, not an external API call.
     const medoviteHospitals = await this.prisma.hospital.findMany({
       where: { active: true, deletedAt: null },
       select: {
@@ -125,27 +152,29 @@ export class HospitalsService {
       },
     })
 
-    this.logger.log(`DEBUG: medoviteHospitals fetched from DB, count = ${medoviteHospitals.length}`)
-    for (const h of medoviteHospitals) {
-      this.logger.log(`DEBUG: DB hospital -> id=${h.id}, name=${h.name}, lat=${h.latitude}, lng=${h.longitude}`)
-    }
-
+    // Tracks which Medovite hospitals get successfully matched to a
+    // Google result below — anything left unmatched after this loop
+    // still needs to be added on its own (see the second loop further down).
     const matchedMedoviteIds = new Set<string>()
 
     const results = googleHospitals.map((place: any) => {
       const medoviteMatch = medoviteHospitals.find(m => {
+        // Best match: exact Google Place ID on file
         if (m.googlePlaceId && m.googlePlaceId === place.placeId) return true
+        // Fallback: same physical location within ~100m
         if (m.latitude && m.longitude) {
           const dist = this.haversineDistance(place.lat, place.lng, m.latitude, m.longitude)
           return dist < 0.1
         }
+        // No loose name-matching fallback — a generic/short hospital
+        // name could accidentally match an unrelated Google result,
+        // silently "consuming" a Medovite hospital as a false match
+        // and preventing it from ever reaching the standalone-entry
+        // loop below. Exact ID or genuine proximity only.
         return false
       })
 
-      if (medoviteMatch) {
-        this.logger.log(`DEBUG: matched Google place "${place.name}" to DB hospital "${medoviteMatch.name}"`)
-        matchedMedoviteIds.add(medoviteMatch.id)
-      }
+      if (medoviteMatch) matchedMedoviteIds.add(medoviteMatch.id)
 
       return {
         ...place,
@@ -159,41 +188,25 @@ export class HospitalsService {
       }
     })
 
-    this.logger.log(`DEBUG: matchedMedoviteIds after Google matching = ${JSON.stringify([...matchedMedoviteIds])}`)
-    this.logger.log('DEBUG: entering standalone-entry loop now')
-
+    // ── Standalone entries ──────────────────────────────────────
+    // Add any Medovite hospital that never matched a Google result,
+    // as long as it has coordinates and falls within the search radius.
     for (const hospital of medoviteHospitals) {
-      this.logger.log(`DEBUG: checking hospital "${hospital.name}" (id=${hospital.id})`)
-
-      if (matchedMedoviteIds.has(hospital.id)) {
-        this.logger.log(`DEBUG: "${hospital.name}" was already matched to a Google place — skipping`)
-        continue
-      }
-
-      if (!hospital.latitude || !hospital.longitude) {
-        this.logger.log(`DEBUG: "${hospital.name}" has no coordinates (lat=${hospital.latitude}, lng=${hospital.longitude}) — skipping`)
-        continue
-      }
+      if (matchedMedoviteIds.has(hospital.id)) continue
+      if (!hospital.latitude || !hospital.longitude) continue
 
       const distance = this.haversineDistance(lat, lng, hospital.latitude, hospital.longitude)
-      this.logger.log(`DEBUG: "${hospital.name}" distance = ${distance}km, radius limit = ${radiusKm}km`)
-
-      if (distance > radiusKm) {
-        this.logger.log(`DEBUG: "${hospital.name}" is outside the radius — skipping`)
-        continue
-      }
-
-      this.logger.log(`DEBUG: "${hospital.name}" PASSED all checks — adding as standalone entry now`)
+      if (distance > radiusKm) continue
 
       results.push({
-        placeId: hospital.googlePlaceId ?? null,
+        placeId: hospital.googlePlaceId ?? null, // no Google presence — null is expected here
         medoviteId: hospital.id,
         name: hospital.name,
         type: hospital.type ?? 'General',
         address: hospital.address ?? 'Address not available',
         lat: hospital.latitude,
         lng: hospital.longitude,
-        isOpenNow: null,
+        isOpenNow: null, // unknown without a Google listing
         rating: hospital.listing?.rating ?? null,
         userRatingsTotal: 0,
         thumbnail: hospital.listing?.photos?.[0] ?? null,
@@ -202,7 +215,7 @@ export class HospitalsService {
         openingHours: null,
         photos: hospital.listing?.photos ?? [],
         emergency: hospital.listing?.emergencyAvailable ?? false,
-        isMedovite: true,
+        isMedovite: true, // always true — this branch only runs for our own hospitals
         medoviteVerified: hospital.listing?.medoviteVerified ?? false,
         specialties: hospital.listing?.specialties ?? [],
         emergencyAvailable: hospital.listing?.emergencyAvailable ?? false,
@@ -210,12 +223,11 @@ export class HospitalsService {
       })
     }
 
-    this.logger.log(`DEBUG: final results count = ${results.length}`)
-
     results.sort((a: any, b: any) => a.distance - b.distance)
     return results
   }
 
+  // ── Get full place details (called only when user taps a hospital) ──
   async getPlaceFullDetails(placeId: string) {
     const cached = detailsCache.get(placeId)
     if (cached && cached.expiresAt > Date.now()) {
@@ -229,6 +241,7 @@ export class HospitalsService {
     return details
   }
 
+  // ── Get single Medovite hospital ──────────────────────────
   async findOne(id: string) {
     const hospital = await this.prisma.hospital.findFirst({
       where: { id, active: true, deletedAt: null },
@@ -271,6 +284,11 @@ export class HospitalsService {
     return hospital
   }
 
+  // ── Google Places Nearby Search (cheap — no details) ─────
+  // Returns basic info only (name, address, rating, one thumbnail).
+  // Full details (phone, website, opening hours) are fetched
+  // separately and only when a user actually taps into a hospital,
+  // to keep Google Places API costs down.
   private async queryGooglePlacesNearby(lat: number, lng: number, radiusKm: number) {
     const radiusMetres = Math.min(radiusKm * 1000, 50000)
     const key = process.env.GOOGLE_PLACES_API_KEY
@@ -300,9 +318,11 @@ export class HospitalsService {
         isOpenNow: place.opening_hours?.open_now ?? null,
         rating: place.rating ?? null,
         userRatingsTotal: place.user_ratings_total ?? 0,
+        // Single thumbnail only — cheaper than fetching all photos
         thumbnail: place.photos?.[0]
           ? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=200&photo_reference=${place.photos[0].photo_reference}&key=${key}`
           : null,
+        // Phone/website/full-hours NOT fetched here — only on detail tap
         phone: null,
         website: null,
         openingHours: null,
@@ -315,6 +335,7 @@ export class HospitalsService {
     }
   }
 
+  // ── Fetch full Place Details (only called when user taps) ──
   private async fetchPlaceDetails(placeId: string) {
     const key = process.env.GOOGLE_PLACES_API_KEY
     const fields = 'place_id,name,formatted_address,formatted_phone_number,website,opening_hours,rating,photos,geometry,types,user_ratings_total'
@@ -359,9 +380,12 @@ export class HospitalsService {
     }
   }
 
+  // ── Map Google place types to our filter categories ─────
+  // Aligns with HOSPITAL_TYPES: 'General' | 'Specialist' | 'Teaching' | 'Clinic'
   private mapGoogleType(types: string[], name?: string): string {
     const lowerName = (name ?? '').toLowerCase()
 
+    // Name-based heuristics first — Google's "types" array is too generic
     if (lowerName.includes('teaching') || lowerName.includes('university')) return 'Teaching'
     if (lowerName.includes('specialist') || lowerName.includes('cardiology') ||
         lowerName.includes('cancer') || lowerName.includes('eye') ||
@@ -370,6 +394,7 @@ export class HospitalsService {
     if (lowerName.includes('clinic') || lowerName.includes('surgery') ||
         lowerName.includes('practice') || lowerName.includes('gp ')) return 'Clinic'
 
+    // Fallback to Google's types array
     if (types.includes('doctor')) return 'Clinic'
     if (types.includes('pharmacy')) return 'Clinic'
     if (types.includes('hospital')) return 'General'
@@ -377,6 +402,7 @@ export class HospitalsService {
     return 'General'
   }
 
+  // ── Haversine distance (km) ──────────────────────────────
   private haversineDistance(
     lat1: number, lng1: number,
     lat2: number, lng2: number,
