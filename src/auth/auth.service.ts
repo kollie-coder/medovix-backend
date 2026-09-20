@@ -195,6 +195,7 @@ async googleAuthNative(idToken: string) {
     select: {
       id: true, email: true, firstName: true, lastName: true,
       role: true, hospitalId: true, active: true,
+      hasPassword: true,
     },
   })
  
@@ -219,6 +220,7 @@ async googleAuthNative(idToken: string) {
       select: {
         id: true, email: true, firstName: true,
         lastName: true, role: true, hospitalId: true, active: true,
+        hasPassword: true,
       },
     })
     await this.prisma.publicProfile.create({ data: { userId: newUser.id } })
