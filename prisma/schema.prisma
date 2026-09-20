@@ -251,6 +251,8 @@ model User {
   updatedAt     DateTime  @updatedAt
   deletedAt     DateTime? // soft delete — GDPR anonymisation, not hard delete
 
+  hasPassword Boolean @default(true)
+  
   // Staff only — null for PUBLIC/PATIENT users
   hospitalId   String?
   hospital     Hospital?   @relation(fields: [hospitalId], references: [id])

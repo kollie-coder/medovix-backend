@@ -211,6 +211,7 @@ async googleAuthNative(idToken: string) {
         firstName: given_name ?? 'User',
         lastName: family_name ?? '',
         passwordHash: await bcrypt.hash(email + Date.now(), 12),
+        hasPassword: false,
         role: Role.PUBLIC,
         avatar: picture ?? null,
         emailVerified: true,
@@ -278,6 +279,7 @@ async googleAuthNative(idToken: string) {
       avatar: true,
       emailVerified: true,
       twoFactorEnabled: true,
+      hasPassword: true,
       createdAt: true,
       publicProfile: true,
       patientProfile: true,
@@ -527,10 +529,37 @@ private async hashBackupCodes(codes: string[]): Promise<string[]> {
 }
 
 // ── Regenerate backup codes (if user wants fresh ones) ──────
+
+// async regenerateBackupCodes(userId: string, password: string) {
+//   const user = await this.prisma.user.findUnique({
+//     where: { id: userId },
+//     select: { passwordHash: true, twoFactorEnabled: true },
+//   })
+ 
+//   if (!user) throw new NotFoundException('User not found')
+//   if (!user.twoFactorEnabled) {
+//     throw new BadRequestException('2FA is not enabled on this account')
+//   }
+ 
+//   const isValid = await bcrypt.compare(password, user.passwordHash)
+//   if (!isValid) throw new UnauthorizedException('Incorrect password')
+ 
+//   const backupCodes = this.generateBackupCodes()
+//   const hashedCodes = await this.hashBackupCodes(backupCodes)
+ 
+//   await this.prisma.user.update({
+//     where: { id: userId },
+//     data: { backupCodes: hashedCodes },
+//   })
+ 
+//   return { backupCodes }
+// }
+
+// ── Regenerate backup codes (if user wants fresh ones) ──────
 async regenerateBackupCodes(userId: string, password: string) {
   const user = await this.prisma.user.findUnique({
     where: { id: userId },
-    select: { passwordHash: true, twoFactorEnabled: true },
+    select: { passwordHash: true, twoFactorEnabled: true, hasPassword: true },
   })
  
   if (!user) throw new NotFoundException('User not found')
@@ -538,8 +567,14 @@ async regenerateBackupCodes(userId: string, password: string) {
     throw new BadRequestException('2FA is not enabled on this account')
   }
  
-  const isValid = await bcrypt.compare(password, user.passwordHash)
-  if (!isValid) throw new UnauthorizedException('Incorrect password')
+  if (user.hasPassword) {
+    if (!password) {
+      throw new BadRequestException('Please enter your password to confirm.')
+    }
+    const isValid = await bcrypt.compare(password, user.passwordHash)
+    if (!isValid) throw new UnauthorizedException('Incorrect password')
+  }
+  // hasPassword === false — skip the password check entirely
  
   const backupCodes = this.generateBackupCodes()
   const hashedCodes = await this.hashBackupCodes(backupCodes)
@@ -630,26 +665,56 @@ async verify2FA(userId: string, code: string) {
 // Only flips twoFactorEnabled to false — keeps twoFactorSecret intact
 // so re-enabling reuses the SAME authenticator app entry rather than
 // creating a confusing duplicate with a different secret.
+// Accounts created via Google have no real password (hasPassword: false),
+// so we can't ask them to confirm one. Being logged in with a valid
+// session is treated as sufficient proof of identity for those accounts.
 async disable2FA(userId: string, password: string) {
   const user = await this.prisma.user.findUnique({
     where: { id: userId },
-    select: { passwordHash: true },
+    select: { passwordHash: true, hasPassword: true },
   })
  
   if (!user) throw new NotFoundException('User not found')
  
-  const isValid = await bcrypt.compare(password, user.passwordHash)
-  if (!isValid) {
-    throw new UnauthorizedException('Incorrect password')
+  if (user.hasPassword) {
+    if (!password) {
+      throw new BadRequestException('Please enter your password to confirm.')
+    }
+    const isValid = await bcrypt.compare(password, user.passwordHash)
+    if (!isValid) {
+      throw new UnauthorizedException('Incorrect password')
+    }
   }
+  // hasPassword === false — skip the password check entirely
  
   await this.prisma.user.update({
     where: { id: userId },
-    data: { twoFactorEnabled: false }, // twoFactorSecret intentionally left untouched
+    data: { twoFactorEnabled: false },
   })
  
   return { message: '2FA disabled' }
 }
+
+// async disable2FA(userId: string, password: string) {
+//   const user = await this.prisma.user.findUnique({
+//     where: { id: userId },
+//     select: { passwordHash: true },
+//   })
+ 
+//   if (!user) throw new NotFoundException('User not found')
+ 
+//   const isValid = await bcrypt.compare(password, user.passwordHash)
+//   if (!isValid) {
+//     throw new UnauthorizedException('Incorrect password')
+//   }
+ 
+//   await this.prisma.user.update({
+//     where: { id: userId },
+//     data: { twoFactorEnabled: false }, // twoFactorSecret intentionally left untouched
+//   })
+ 
+//   return { message: '2FA disabled' }
+// }
  
 // ── 2FA: Full reset (new secret, forces re-scan) ───────────
 // Only call this if the user explicitly wants to reset — e.g. they
