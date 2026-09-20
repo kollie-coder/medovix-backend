@@ -530,32 +530,6 @@ private async hashBackupCodes(codes: string[]): Promise<string[]> {
   return Promise.all(codes.map(code => bcrypt.hash(code, 10)))
 }
 
-// ── Regenerate backup codes (if user wants fresh ones) ──────
-
-// async regenerateBackupCodes(userId: string, password: string) {
-//   const user = await this.prisma.user.findUnique({
-//     where: { id: userId },
-//     select: { passwordHash: true, twoFactorEnabled: true },
-//   })
- 
-//   if (!user) throw new NotFoundException('User not found')
-//   if (!user.twoFactorEnabled) {
-//     throw new BadRequestException('2FA is not enabled on this account')
-//   }
- 
-//   const isValid = await bcrypt.compare(password, user.passwordHash)
-//   if (!isValid) throw new UnauthorizedException('Incorrect password')
- 
-//   const backupCodes = this.generateBackupCodes()
-//   const hashedCodes = await this.hashBackupCodes(backupCodes)
- 
-//   await this.prisma.user.update({
-//     where: { id: userId },
-//     data: { backupCodes: hashedCodes },
-//   })
- 
-//   return { backupCodes }
-// }
 
 // ── Regenerate backup codes (if user wants fresh ones) ──────
 async regenerateBackupCodes(userId: string, password: string) {
@@ -697,27 +671,6 @@ async disable2FA(userId: string, password: string) {
   return { message: '2FA disabled' }
 }
 
-// async disable2FA(userId: string, password: string) {
-//   const user = await this.prisma.user.findUnique({
-//     where: { id: userId },
-//     select: { passwordHash: true },
-//   })
- 
-//   if (!user) throw new NotFoundException('User not found')
- 
-//   const isValid = await bcrypt.compare(password, user.passwordHash)
-//   if (!isValid) {
-//     throw new UnauthorizedException('Incorrect password')
-//   }
- 
-//   await this.prisma.user.update({
-//     where: { id: userId },
-//     data: { twoFactorEnabled: false }, // twoFactorSecret intentionally left untouched
-//   })
- 
-//   return { message: '2FA disabled' }
-// }
- 
 // ── 2FA: Full reset (new secret, forces re-scan) ───────────
 // Only call this if the user explicitly wants to reset — e.g. they
 // lost their phone/authenticator app and need a completely fresh secret.
