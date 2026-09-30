@@ -176,6 +176,8 @@ model Hospital {
   updatedAt   DateTime           @updatedAt
   deletedAt   DateTime?
 
+  emailInvitesEnabled Boolean @default(true)
+  
   // Relations
   staff           User[]              // doctors, nurses, etc.
   patients        HospitalPatient[]   // junction — patients at this hospital
