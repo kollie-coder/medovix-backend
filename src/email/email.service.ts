@@ -62,4 +62,70 @@ export class EmailService {
       throw err
     }
   }
+
+  async sendStaffInviteEmail(
+    toEmail: string,
+    toName: string,
+    hospitalName: string,
+    role: string,
+    temporaryPassword: string,
+  ) {
+    const html = `
+      <div style="font-family: -apple-system, Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px 24px;">
+        <h1 style="color: #0A7EA4; font-size: 22px; margin-bottom: 4px;">Medovite</h1>
+        <p style="color: #6B7280; font-size: 13px; margin-top: 0; margin-bottom: 24px;">Healthcare Platform</p>
+  
+        <h2 style="color: #0D1117; font-size: 18px;">You've been added to ${hospitalName}</h2>
+        <p style="color: #374151; font-size: 14px; line-height: 22px;">
+          Hi ${toName},<br><br>
+          You've been added as a <strong>${role}</strong> on Medovite for ${hospitalName}.
+          Use the temporary credentials below to sign in for the first time.
+        </p>
+  
+        <div style="background: #F0F7FA; border: 1.5px solid #B8DFF0; border-radius: 12px; padding: 20px; margin: 24px 0;">
+          <p style="margin: 0 0 8px 0; font-size: 12px; color: #6B7280; font-weight: 600;">EMAIL</p>
+          <p style="margin: 0 0 16px 0; font-size: 14px; color: #0D1117;">${toEmail}</p>
+          <p style="margin: 0 0 8px 0; font-size: 12px; color: #6B7280; font-weight: 600;">TEMPORARY PASSWORD</p>
+          <p style="margin: 0; font-size: 18px; font-weight: 700; color: #0A7EA4; font-family: monospace;">${temporaryPassword}</p>
+        </div>
+  
+        <p style="color: #6B7280; font-size: 13px; line-height: 20px;">
+          For your security, please change this password after signing in for the first time.
+        </p>
+  
+        <div style="border-top: 1px solid #E5E7EB; margin-top: 32px; padding-top: 16px;">
+          <p style="color: #9CA3AF; font-size: 11px;">Medovite Healthcare Platform · This is an automated message, please do not reply.</p>
+        </div>
+      </div>
+    `
+  
+    try {
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'api-key': this.apiKey as string,
+        },
+        body: JSON.stringify({
+          sender: { email: this.senderEmail, name: this.senderName },
+          to: [{ email: toEmail, name: toName }],
+          subject: `You've been added to ${hospitalName} on Medovite`,
+          htmlContent: html,
+        }),
+      })
+  
+      if (!response.ok) {
+        const err = await response.text()
+        this.logger.error(`Brevo API rejected staff invite email to ${toEmail}: ${err}`)
+        return false // don't throw — a failed invite email shouldn't block account creation
+      }
+  
+      return true
+    } catch (err) {
+      this.logger.error(`Failed to send staff invite email to ${toEmail}`, err)
+      return false
+    }
+  }
+
 }

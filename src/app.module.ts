@@ -13,6 +13,8 @@ import { DietaryModule } from './dietary/dietary.module'
 import { NotificationPreferencesModule } from './notification-preferences/notification-preferences.module'
 import { NotificationsModule } from './notifications/notifications.module'
 import { LoggingMiddleware } from './common/middleware/logging.middleware'
+import { SuperAdminModule } from './super-admin/super-admin.module'
+import { HospitalAdminModule } from './hospital-admin/hospital-admin.module'
 
 @Module({
   imports: [
@@ -24,7 +26,9 @@ import { LoggingMiddleware } from './common/middleware/logging.middleware'
     NotificationPreferencesModule,
     DietaryModule,
     PushTokensModule,
-    NotificationsModule
+    NotificationsModule,
+    SuperAdminModule,
+    HospitalAdminModule
   ],
   controllers: [AppController],
   providers: [
