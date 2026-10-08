@@ -5,7 +5,8 @@ import {
   UnauthorizedException,
   ConflictException,
   NotFoundException,  
-  BadRequestException, 
+  BadRequestException,
+  ForbiddenException, 
 } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { PrismaService } from '../prisma/prisma.service'
@@ -27,6 +28,112 @@ export class AuthService {
     private jwt: JwtService,
     private emailService: EmailService,
   ) {}
+
+ // ── Delete account (mobile app users) ───────────────────
+  async deleteAccount(
+    userId: string,
+    dto: { password?: string; confirmation?: string },
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        role: true,
+        passwordHash: true,
+        hasPassword: true,
+        deletedAt: true,
+      },
+    })
+    if (!user || user.deletedAt) throw new NotFoundException('Account not found')
+ 
+    // Hospital staff accounts belong to their hospital, which controls
+    // access to them. Their admin deactivates them from the portal.
+    if (user.role !== Role.PUBLIC && user.role !== Role.PATIENT) {
+      throw new ForbiddenException(
+        'Staff accounts are managed by your hospital. Please ask your hospital administrator to deactivate your account.',
+      )
+    }
+ 
+    // ── Confirm it's really them ──
+    if (user.hasPassword) {
+      if (!dto.password) throw new BadRequestException('Please enter your password to confirm')
+      const valid = await bcrypt.compare(dto.password, user.passwordHash)
+      if (!valid) throw new UnauthorizedException('Password is incorrect')
+    } else {
+      // Signed up with Google and never set a password
+      if (dto.confirmation?.trim().toUpperCase() !== 'DELETE') {
+        throw new BadRequestException('Type DELETE to confirm')
+      }
+    }
+ 
+    // Don't silently destroy money
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { userId },
+      select: { balance: true },
+    })
+    if (wallet && wallet.balance > 0) {
+      throw new BadRequestException(
+        'Your wallet still has a balance. Please use or withdraw it before deleting your account.',
+      )
+    }
+ 
+    const randomPasswordHash = await bcrypt.hash(crypto.randomBytes(32).toString('hex'), 12)
+ 
+    await this.prisma.$transaction([
+      // Sessions and devices
+      this.prisma.pushToken.deleteMany({ where: { userId } }),
+      this.prisma.refreshToken.deleteMany({ where: { userId } }),
+      this.prisma.passwordResetToken.deleteMany({ where: { userId } }),
+ 
+      // Personal data the user created in the app (food logs go with the
+      // diet profile via the existing ON DELETE CASCADE)
+      this.prisma.notification.deleteMany({ where: { userId } }),
+      this.prisma.notificationPreferences.deleteMany({ where: { userId } }),
+      this.prisma.medicationReminder.deleteMany({ where: { userId } }),
+      this.prisma.dietProfile.deleteMany({ where: { userId } }),
+      this.prisma.publicProfile.deleteMany({ where: { userId } }),
+ 
+      // Hospital-held clinical profile stays (the hospital's record), but
+      // direct personal identifiers are cleared
+      this.prisma.patientProfile.updateMany({
+        where: { userId },
+        data: {
+          emergencyName: null,
+          emergencyPhone: null,
+          emergencyRelation: null,
+          insuranceProvider: null,
+          insuranceNumber: null,
+        },
+      }),
+ 
+      // The account itself: anonymise. The ".invalid" domain can never
+      // receive mail, and the id keeps the unique email constraint happy.
+      this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          email: `deleted+${userId}@deleted.invalid`,
+          phone: null,
+          passwordHash: randomPasswordHash,
+          hasPassword: false,
+          firstName: 'Deleted',
+          lastName: 'User',
+          dateOfBirth: null,
+          gender: null,
+          avatar: null,
+          emailVerified: false,
+          phoneVerified: false,
+          twoFactorEnabled: false,
+          twoFactorSecret: null,
+          backupCodes: [],
+          active: false,
+          deletedAt: new Date(),
+        },
+      }),
+    ])
+ 
+    this.logger.log(`Account deleted (anonymised): ${userId}`)
+    return { message: 'Your account has been deleted' }
+  }
 
   // ── Register ────────────────────────────────────────────
   async register(dto: RegisterDto) {

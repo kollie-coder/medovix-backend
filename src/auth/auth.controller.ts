@@ -12,6 +12,16 @@ import { CurrentUser } from './decorators/current-user.decorator'
 export class AuthController {
   constructor(private authService: AuthService) {}
 
+  @Post('delete-account')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(200)
+  deleteAccount(
+    @CurrentUser('id') userId: string,
+    @Body() dto: { password?: string; confirmation?: string },
+  ) {
+    return this.authService.deleteAccount(userId, dto)
+  } 
+
   @Post('register')
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto)
