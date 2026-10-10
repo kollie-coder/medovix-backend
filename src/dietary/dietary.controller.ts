@@ -131,9 +131,4 @@ export class DietaryController {
     return this.dietaryService.deleteLog(userId, logId)
   }
 
-  // POST /api/v1/dietary/seed (admin use — seeds food database)
-  @Post('seed')
-  seedFoodDatabase() {
-    return this.dietaryService.seedFoodDatabase()
-  }
 }

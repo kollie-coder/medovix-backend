@@ -29,10 +29,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         role: true,
         hospitalId: true,
         active: true,
+        deletedAt: true,
       },
     })
 
-    if (!user || !user.active) {
+    if (!user || !user.active || user.deletedAt) {
       throw new UnauthorizedException('User not found or inactive')
     }
 

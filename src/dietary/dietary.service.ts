@@ -1,5 +1,5 @@
 // src/dietary/dietary.service.ts
-import { Injectable, Logger, NotFoundException } from '@nestjs/common'
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { HealthCondition, ActivityLevel, MealType } from '@prisma/client'
 
@@ -60,6 +60,18 @@ const ACTIVITY_MULTIPLIERS: Record<string, number> = {
 export class DietaryService {
   private readonly logger = new Logger(DietaryService.name)
   constructor(private prisma: PrismaService) {}
+
+  // Portion must be a sane positive number (stops divide-by-zero and absurd values)
+  private assertPortion(portionGrams: number) {
+    if (!Number.isFinite(portionGrams) || portionGrams <= 0 || portionGrams > 5000) {
+      throw new BadRequestException('portionGrams must be between 1 and 5000')
+    }
+  }
+
+  private adherence(consumed: number, target: number) {
+    if (!target || target <= 0) return 0
+    return Math.min(Math.round((consumed / target) * 100), 100)
+  }
 
   private async getOrCreateProfile(userId: string) {
     let profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
@@ -154,9 +166,7 @@ export class DietaryService {
       DINNER: logs.filter(l => l.mealType === 'DINNER'),
       SNACK: logs.filter(l => l.mealType === 'SNACK'),
     },
-    adherencePercent: Math.min(
-      Math.round((totals.calories / profile.dailyCalories) * 100), 100
-    ),
+    adherencePercent: this.adherence(totals.calories, profile.dailyCalories),
   }
 }
  
@@ -183,7 +193,7 @@ async getWeeklySummary(userId: string, startDate: string) {
       calories: Math.round(calories),
       target: profile.dailyCalories,
       logged: dayLogs.length > 0,
-      adherencePercent: Math.min(Math.round((calories / profile.dailyCalories) * 100), 100),
+      adherencePercent: this.adherence(calories, profile.dailyCalories),
     }
   })
 }
@@ -195,9 +205,9 @@ async getWeeklySummary(userId: string, startDate: string) {
     portionGrams: number
     date: string
   }) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
+    const profile = await this.getOrCreateProfile(userId)
 
+    this.assertPortion(dto.portionGrams)
     const food = await this.prisma.foodItem.findUnique({ where: { id: dto.foodItemId } })
     if (!food) throw new NotFoundException('Food item not found')
 
@@ -220,8 +230,7 @@ async getWeeklySummary(userId: string, startDate: string) {
 
   // ── Delete a food log entry ────────────────────────────
   async deleteLog(userId: string, logId: string) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
+    const profile = await this.getOrCreateProfile(userId)
     await this.prisma.foodLog.deleteMany({
       where: { id: logId, dietProfileId: profile.id },
     })
@@ -464,7 +473,7 @@ async getWeeklySummary(userId: string, startDate: string) {
         `&fields=product_name,nutriments,serving_size,image_url`
 
       const response = await fetch(url, {
-        headers: { 'User-Agent': 'Medovix - Healthcare App - Android/iOS - Version 1.0' },
+        headers: { 'User-Agent': 'Medovite - Healthcare App - Android/iOS - Version 1.0 (support@medovite.com)' },
       })
 
       if (!response.ok) return []
@@ -511,9 +520,9 @@ async getWeeklySummary(userId: string, startDate: string) {
     portionGrams: number
     date: string
   }) {
-    const profile = await this.prisma.dietProfile.findUnique({ where: { userId } })
-    if (!profile) throw new NotFoundException('Diet profile not found')
+    const profile = await this.getOrCreateProfile(userId)
 
+    this.assertPortion(dto.portionGrams)
     const foodItem = await this.prisma.foodItem.create({
       data: {
         name: dto.name,
@@ -549,7 +558,7 @@ async getWeeklySummary(userId: string, startDate: string) {
 
   // ── Nutrition estimation (own DB first, then AI, then Open Food Facts) ──
   async estimateNutrition(foodName: string, portionGrams: number = 100) {
-    
+    this.assertPortion(portionGrams)
     const ownMatches = await this.searchFood(foodName)
     
     if (ownMatches.length > 0) {
@@ -591,7 +600,7 @@ async getWeeklySummary(userId: string, startDate: string) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: process.env.ANTHROPIC_MODEL ?? 'claude-sonnet-4-6',
         max_tokens: 200,
         messages: [{
           role: 'user',
@@ -633,7 +642,7 @@ Base your estimates on typical Nigerian/African or international food data.`,
       `&fields=product_name,nutriments`
 
     const headers = {
-      'User-Agent': 'Medovix - Healthcare App - Android/iOS - Version 1.0',
+      'User-Agent': 'Medovite - Healthcare App - Android/iOS - Version 1.0 (support@medovite.com)',
       'Accept': 'application/json',
     }
 
