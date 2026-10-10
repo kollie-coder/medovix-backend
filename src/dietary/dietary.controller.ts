@@ -7,9 +7,10 @@ import { DietaryService } from './dietary.service'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { HealthCondition, ActivityLevel, MealType } from '@prisma/client'
+import { DietAccessGuard } from "../common/diet-access.guard"
 
 @Controller('dietary')
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, DietAccessGuard)
 export class DietaryController {
   constructor(private dietaryService: DietaryService) {}
 

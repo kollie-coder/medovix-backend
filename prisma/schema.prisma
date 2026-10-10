@@ -149,6 +149,11 @@ enum WalletTransactionType {
   DEBIT
 }
 
+enum UserPlan {
+  FREE
+  PREMIUM
+}
+
 // ── Hospital (tenant) ──────────────────────────────────────
 
 model Hospital {
@@ -254,6 +259,10 @@ model User {
   deletedAt     DateTime? // soft delete — GDPR anonymisation, not hard delete
 
   hasPassword Boolean @default(true)
+
+  // Consumer app subscription (PUBLIC / PATIENT users).
+  plan          UserPlan  @default(FREE)
+  planExpiresAt DateTime? // null = no expiry
   
   // Staff only — null for PUBLIC/PATIENT users
   hospitalId   String?
