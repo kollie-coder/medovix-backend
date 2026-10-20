@@ -1,4 +1,3 @@
-// src/auth/auth.service.ts
 import {
   Injectable,
   Logger,
@@ -153,7 +152,10 @@ export class AuthService {
         firstName: dto.firstName,
         lastName: dto.lastName,
         phone: dto.phone,
-        role: dto.role ?? Role.PUBLIC,
+        // Public sign-up can only ever create a PUBLIC account. Staff and
+        // patient accounts are created by the hospital, never by whatever
+        // role a caller puts in the request body.
+        role: Role.PUBLIC,
       },
       select: {
         id: true,
@@ -161,6 +163,10 @@ export class AuthService {
         firstName: true,
         lastName: true,
         role: true,
+        hospitalId: true,
+        avatar: true,
+        emailVerified: true,
+        hasPassword: true,
         createdAt: true,
       },
     })
@@ -183,6 +189,7 @@ export class AuthService {
       id: true, email: true, firstName: true, lastName: true, role: true,
       hospitalId: true, passwordHash: true, active: true,
       twoFactorEnabled: true,
+      avatar: true, emailVerified: true, hasPassword: true,
     },
   })
  
@@ -196,9 +203,11 @@ export class AuthService {
   if (user.twoFactorEnabled) {
     // Short-lived token just to prove they passed step 1 (password check)
     // Used to call /auth/2fa/login-verify next
+    // Signed with its OWN secret so it can never be accepted as a normal
+    // access token (which would skip the second step entirely).
     const pendingToken = this.jwt.sign(
       { sub: user.id, purpose: '2fa_pending' },
-      { expiresIn: '5m' as any },
+      { expiresIn: '5m' as any, secret: this.pendingTokenSecret() },
     )
     return {
       requires2FA: true,
@@ -220,7 +229,7 @@ export class AuthService {
 async completeLogin2FA(pendingToken: string, code: string) {
   let payload: any
   try {
-    payload = this.jwt.verify(pendingToken)
+    payload = this.jwt.verify(pendingToken, { secret: this.pendingTokenSecret() })
   } catch {
     throw new UnauthorizedException('Login session expired. Please log in again.')
   }
@@ -254,11 +263,13 @@ async completeLogin2FA(pendingToken: string, code: string) {
     where: { id: payload.sub },
     select: {
       id: true, email: true, firstName: true, lastName: true,
-      role: true, hospitalId: true,
+      role: true, hospitalId: true, active: true,
+      avatar: true, emailVerified: true, hasPassword: true,
     },
   })
  
   if (!user) throw new UnauthorizedException('User not found')
+  if (!user.active) throw new UnauthorizedException('Your account has been deactivated')
  
   await this.prisma.user.update({
     where: { id: user.id },
@@ -279,7 +290,7 @@ async completeLogin2FA(pendingToken: string, code: string) {
 // ── Google OAuth ─────────────────────────────────────────
 async googleAuthNative(idToken: string) {
   const response = await fetch(
-    `https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`
   )
  
   if (!response.ok) {
@@ -296,13 +307,19 @@ async googleAuthNative(idToken: string) {
   const { email, given_name, family_name, picture } = googleUser
  
   if (!email) throw new UnauthorizedException('Google account has no email')
+
+  // Only trust an email address Google itself has verified; otherwise someone
+  // could sign in to an existing account with an unverified lookalike.
+  if (googleUser.email_verified !== true && googleUser.email_verified !== 'true') {
+    throw new UnauthorizedException('Google email is not verified')
+  }
  
   let user = await this.prisma.user.findUnique({
     where: { email },
     select: {
       id: true, email: true, firstName: true, lastName: true,
       role: true, hospitalId: true, active: true,
-      hasPassword: true,
+      hasPassword: true, avatar: true, emailVerified: true,
     },
   })
  
@@ -327,7 +344,7 @@ async googleAuthNative(idToken: string) {
       select: {
         id: true, email: true, firstName: true,
         lastName: true, role: true, hospitalId: true, active: true,
-        hasPassword: true,
+        hasPassword: true, avatar: true, emailVerified: true,
       },
     })
     await this.prisma.publicProfile.create({ data: { userId: newUser.id } })
@@ -346,6 +363,9 @@ async googleAuthNative(idToken: string) {
     })
 
     if (!stored || stored.revoked || stored.expiresAt < new Date()) {
+      throw new UnauthorizedException('Invalid or expired refresh token')
+    }
+    if (!stored.user.active || stored.user.deletedAt) {
       throw new UnauthorizedException('Invalid or expired refresh token')
     }
 
@@ -394,6 +414,12 @@ async googleAuthNative(idToken: string) {
       patientProfile: true,
     },
     })
+  }
+
+  // Secret for the short-lived "password OK, 2FA still needed" token.
+  // Different from the access-token secret on purpose.
+  private pendingTokenSecret(): string {
+    return (process.env.JWT_SECRET as string) + '_2fa_pending'
   }
 
   // ── Generate tokens ─────────────────────────────────────
@@ -579,7 +605,7 @@ async resetPassword(email: string, code: string, newPassword: string) {
   await this.prisma.$transaction([
     this.prisma.user.update({
       where: { id: user.id },
-      data: { passwordHash: newHash },
+      data: { passwordHash: newHash, hasPassword: true },
     }),
     this.prisma.passwordResetToken.update({
       where: { id: matchedToken.id },
