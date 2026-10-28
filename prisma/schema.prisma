@@ -19,6 +19,8 @@ enum Role {
   PHARMACIST
   LAB_TECHNICIAN
   DIETICIAN
+  RECEPTIONIST
+  ACCOUNTANT
   ADMIN
   SUPER_ADMIN  // Medovite platform admin
 }
@@ -52,6 +54,8 @@ enum HospitalPatientStatus {
 enum AppointmentStatus {
   PENDING
   CONFIRMED
+  CHECKED_IN   // patient has arrived and is in the queue
+  IN_PROGRESS  // patient is with the doctor
   CANCELLED
   COMPLETED
   NO_SHOW
@@ -73,8 +77,22 @@ enum RecordType {
 
 enum PrescriptionStatus {
   ACTIVE
+  DISPENSED    // pharmacist has handed the medication to the patient
   COMPLETED
   CANCELLED
+}
+
+enum LabOrderStatus {
+  REQUESTED
+  SAMPLE_COLLECTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum LabOrderPriority {
+  ROUTINE
+  URGENT
 }
 
 enum BillStatus {
@@ -189,6 +207,7 @@ model Hospital {
   departments     Department[]
   appointments    Appointment[]
   records         MedicalRecord[]
+  labOrders       LabOrder[]
   bills           Bill[]
   conversations   Conversation[]
   auditLogs       AuditLog[]
@@ -296,6 +315,17 @@ model User {
   // Records
   medicalRecords MedicalRecord[] @relation("RecordCreatedBy")
   patientRecords MedicalRecord[] @relation("PatientRecords")
+
+  // Prescriptions dispensed by this user (pharmacist)
+  dispensedPrescriptions Prescription[] @relation("PrescriptionDispensedBy")
+
+  // Lab orders
+  patientLabOrders   LabOrder[] @relation("PatientLabOrders")
+  orderedLabOrders   LabOrder[] @relation("OrderedLabOrders")
+  performedLabOrders LabOrder[] @relation("PerformedLabOrders")
+
+  // Bills (as the patient being billed)
+  patientBills Bill[] @relation("PatientBills")
 
   // Conversations
   conversations ConversationParticipant[]
@@ -482,6 +512,9 @@ model Appointment {
   updatedAt    DateTime          @updatedAt
   deletedAt    DateTime?
 
+  records   MedicalRecord[]
+  labOrders LabOrder[]
+
   @@index([hospitalId])
   @@index([patientId])
   @@index([doctorId])
@@ -502,6 +535,8 @@ model MedicalRecord {
   summary     String?
   createdById String
   createdBy   User          @relation("RecordCreatedBy", fields: [createdById], references: [id])
+  appointmentId String?     // the visit this record came from, if any
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
   createdAt   DateTime      @default(now())
   updatedAt   DateTime      @updatedAt
   deletedAt   DateTime?     // soft delete only — never hard delete medical records
@@ -511,9 +546,11 @@ model MedicalRecord {
   prescription Prescription?
   vitals       VitalsRecord?
   radiology    RadiologyRecord?
+  labOrder     LabOrder?
 
   @@index([hospitalId])
   @@index([patientId])
+  @@index([appointmentId])
   @@index([type])
   @@index([createdAt])
 }
@@ -551,6 +588,9 @@ model Prescription {
   refillsAllowed Int                @default(0)
   refillsUsed    Int                @default(0)
   notes          String?
+  dispensedAt    DateTime?
+  dispensedById  String?
+  dispensedBy    User?              @relation("PrescriptionDispensedBy", fields: [dispensedById], references: [id])
   medications    PrescriptionItem[]
   createdAt      DateTime           @default(now())
 }
@@ -565,6 +605,39 @@ model PrescriptionItem {
   duration       String
   instructions   String?
   createdAt      DateTime     @default(now())
+}
+
+// A test requested by a doctor. The lab technician works the order and,
+// when finished, attaches the resulting MedicalRecord (type LAB_RESULT).
+model LabOrder {
+  id               String           @id @default(cuid())
+  hospitalId       String
+  hospital         Hospital         @relation(fields: [hospitalId], references: [id])
+  patientId        String
+  patient          User             @relation("PatientLabOrders", fields: [patientId], references: [id])
+  orderedById      String
+  orderedBy        User             @relation("OrderedLabOrders", fields: [orderedById], references: [id])
+  appointmentId    String?
+  appointment      Appointment?     @relation(fields: [appointmentId], references: [id])
+  testName         String
+  priority         LabOrderPriority @default(ROUTINE)
+  status           LabOrderStatus   @default(REQUESTED)
+  clinicalNotes    String?
+  sampleCollectedAt DateTime?
+  performedById    String?
+  performedBy      User?            @relation("PerformedLabOrders", fields: [performedById], references: [id])
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  cancelReason     String?
+  resultRecordId   String?          @unique
+  resultRecord     MedicalRecord?   @relation(fields: [resultRecordId], references: [id])
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([hospitalId, status])
+  @@index([patientId])
+  @@index([orderedById])
+  @@index([appointmentId])
 }
 
 model VitalsRecord {
@@ -604,6 +677,7 @@ model Bill {
   hospitalId  String
   hospital    Hospital   @relation(fields: [hospitalId], references: [id])
   patientId   String
+  patient     User       @relation("PatientBills", fields: [patientId], references: [id])
   invoiceNo   String     @unique
   status      BillStatus @default(PENDING)
   totalAmount Float
