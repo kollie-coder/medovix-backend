@@ -15,6 +15,8 @@ import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { Role } from '@prisma/client'
 import { EmailService } from '../email/email.service'
+import { AttemptLimiter } from '../common/attempt-limiter'
+import { normalizeEmail } from '../common/normalize-email'
 
 import { generateSecret, generate, verify, generateURI } from 'otplib'
 import * as qrcode from 'qrcode'
@@ -22,6 +24,21 @@ import * as qrcode from 'qrcode'
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name)
+
+  // Wrong-guess lockouts, per account. These stop someone who rotates IP
+  // addresses to get round the per-IP rate limits.
+  private readonly loginAttempts = new AttemptLimiter(10, 15 * 60_000, 15 * 60_000,
+    'Too many failed sign-in attempts. Please try again in 15 minutes, or reset your password.')
+  private readonly codeAttempts = new AttemptLimiter(5, 15 * 60_000, 15 * 60_000,
+    'Too many incorrect codes. Please wait 15 minutes and try again.')
+  private readonly twoFaAttempts = new AttemptLimiter(5, 15 * 60_000, 15 * 60_000,
+    'Too many incorrect codes. Please wait 15 minutes and log in again.')
+  // Compared against when an email is unknown, so an unknown email takes as
+  // long to answer as a real one and response time cannot be used to find out
+  // which emails have accounts.
+  private readonly dummyPasswordHash = bcrypt.hashSync('medovite-dummy-password', 12)
+  private readonly dummyCodeHash = bcrypt.hashSync('medovite-dummy-code', 10)
+
   constructor(
     private prisma: PrismaService,
     private jwt: JwtService,
@@ -136,8 +153,9 @@ export class AuthService {
 
   // ── Register ────────────────────────────────────────────
   async register(dto: RegisterDto) {
+    const email = normalizeEmail(dto.email)
     const existing = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email },
     })
     if (existing) {
       throw new ConflictException('An account with this email already exists')
@@ -147,7 +165,7 @@ export class AuthService {
 
     const user = await this.prisma.user.create({
       data: {
-        email: dto.email,
+        email,
         passwordHash,
         firstName: dto.firstName,
         lastName: dto.lastName,
@@ -183,8 +201,10 @@ export class AuthService {
 
   // ── Login ───────────────────────────────────────────────
   async login(dto: LoginDto) {
+  const loginKey = normalizeEmail(dto.email)
+  this.loginAttempts.assertAllowed(loginKey)
   const user = await this.prisma.user.findUnique({
-    where: { email: dto.email },
+    where: { email: loginKey },
     select: {
       id: true, email: true, firstName: true, lastName: true, role: true,
       hospitalId: true, passwordHash: true, active: true,
@@ -193,11 +213,23 @@ export class AuthService {
     },
   })
  
-  if (!user) throw new UnauthorizedException('Invalid email or password')
-  if (!user.active) throw new UnauthorizedException('Your account has been deactivated')
- 
+  if (!user) {
+    // Spend the same time as a real check, then give the same answer.
+    await bcrypt.compare(dto.password ?? '', this.dummyPasswordHash)
+    this.loginAttempts.fail(loginKey)
+    throw new UnauthorizedException('Invalid email or password')
+  }
+
   const passwordValid = await bcrypt.compare(dto.password, user.passwordHash)
-  if (!passwordValid) throw new UnauthorizedException('Invalid email or password')
+  if (!passwordValid) {
+    this.loginAttempts.fail(loginKey)
+    throw new UnauthorizedException('Invalid email or password')
+  }
+  this.loginAttempts.success(loginKey)
+
+  // Checked only after the password, so nobody can learn that an email
+  // belongs to a deactivated account without knowing its password.
+  if (!user.active) throw new UnauthorizedException('Your account has been deactivated')
  
   // If 2FA is enabled, don't issue tokens yet — require a second step
   if (user.twoFactorEnabled) {
@@ -237,6 +269,7 @@ async completeLogin2FA(pendingToken: string, code: string) {
   if (payload.purpose !== '2fa_pending') {
     throw new UnauthorizedException('Invalid session')
   }
+  this.twoFaAttempts.assertAllowed(payload.sub)
  
   // Try TOTP code first (6 digits), fall back to backup code format (XXXXX-XXXXX)
   const isTotpFormat = /^\d{6}$/.test(code.trim())
@@ -256,8 +289,10 @@ async completeLogin2FA(pendingToken: string, code: string) {
   }
  
   if (!isValidCode) {
+    this.twoFaAttempts.fail(payload.sub)
     throw new UnauthorizedException('Invalid code. Please check your authenticator app or use a backup code.')
   }
+  this.twoFaAttempts.success(payload.sub)
  
   const user = await this.prisma.user.findUnique({
     where: { id: payload.sub },
@@ -304,7 +339,8 @@ async googleAuthNative(idToken: string) {
     throw new UnauthorizedException('Google token was not issued for this app')
   }
  
-  const { email, given_name, family_name, picture } = googleUser
+  const { given_name, family_name, picture } = googleUser
+  const email = normalizeEmail(googleUser.email)
  
   if (!email) throw new UnauthorizedException('Google account has no email')
 
@@ -484,13 +520,16 @@ async changePassword(userId: string, dto: {
 
 
 // ── Request password reset — sends a 6-digit code by email ──
-async requestPasswordReset(email: string) {
+async requestPasswordReset(rawEmail: string) {
+  const email = normalizeEmail(rawEmail)
   const user = await this.prisma.user.findUnique({
     where: { email },
     select: { id: true, email: true, firstName: true },
   })
  
   if (!user) {
+    // Do the same hashing work a real request does, so the time taken gives nothing away.
+    await bcrypt.hash(crypto.randomInt(100000, 999999).toString(), 10)
     return { message: 'If an account exists with this email, a reset code has been sent.' }
   }
  
@@ -536,11 +575,11 @@ async requestPasswordReset(email: string) {
     },
   })
  
-  try {
-    await this.emailService.sendPasswordResetCode(user.email, user.firstName, code)
-  } catch (err) {
+  // Not awaited: waiting for the mail server would make a real account answer
+  // more slowly than an unknown email. A failure is still logged.
+  void Promise.resolve(this.emailService.sendPasswordResetCode(user.email, user.firstName, code)).catch((err) => {
     this.logger.error(`Failed to send password reset email to user ${user.id}`, err)
-  }
+  })
  
   return { message: 'If an account exists with this email, a reset code has been sent.' }
 }
@@ -549,12 +588,18 @@ async requestPasswordReset(email: string) {
 // Optional — lets the mobile app check a code is valid before
 // showing the "set new password" screen, without using it up
 async verifyResetCode(email: string, code: string) {
+  const codeKey = normalizeEmail(email)
+  this.codeAttempts.assertAllowed(codeKey)
   const user = await this.prisma.user.findUnique({
-    where: { email },
+    where: { email: codeKey },
     select: { id: true },
   })
  
-  if (!user) throw new BadRequestException('Invalid or expired code')
+  if (!user) {
+    await bcrypt.compare(code ?? '', this.dummyCodeHash)
+    this.codeAttempts.fail(codeKey)
+    throw new BadRequestException('Invalid or expired code')
+  }
  
   const tokens = await this.prisma.passwordResetToken.findMany({
     where: { userId: user.id, used: false, expiresAt: { gt: new Date() } },
@@ -566,6 +611,7 @@ async verifyResetCode(email: string, code: string) {
     if (matches) return { valid: true }
   }
  
+  this.codeAttempts.fail(codeKey)
   throw new BadRequestException('Invalid or expired code')
 }
  
@@ -575,12 +621,19 @@ async resetPassword(email: string, code: string, newPassword: string) {
     throw new BadRequestException('Password must be at least 8 characters')
   }
  
+  const codeKey = normalizeEmail(email)
+  this.codeAttempts.assertAllowed(codeKey)
+
   const user = await this.prisma.user.findUnique({
-    where: { email },
+    where: { email: codeKey },
     select: { id: true },
   })
  
-  if (!user) throw new BadRequestException('Invalid or expired code')
+  if (!user) {
+    await bcrypt.compare(code ?? '', this.dummyCodeHash)
+    this.codeAttempts.fail(codeKey)
+    throw new BadRequestException('Invalid or expired code')
+  }
  
   const tokens = await this.prisma.passwordResetToken.findMany({
     where: { userId: user.id, used: false, expiresAt: { gt: new Date() } },
@@ -597,8 +650,10 @@ async resetPassword(email: string, code: string, newPassword: string) {
   }
  
   if (!matchedToken) {
+    this.codeAttempts.fail(codeKey)
     throw new BadRequestException('Invalid or expired code')
   }
+  this.codeAttempts.success(codeKey)
  
   const newHash = await bcrypt.hash(newPassword, 12)
  

@@ -1,7 +1,8 @@
-import { Injectable, NotFoundException, ConflictException, ForbiddenException, Logger, BadRequestException } from '@nestjs/common'
+import { auditMeta } from '../common/request-context'
+import { Injectable, NotFoundException, ConflictException, ForbiddenException, Logger, BadRequestException, HttpException, HttpStatus } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 import { EmailService } from 'src/email/email.service'
-import { Role, Gender, BloodGroup, HospitalPatientStatus, AppointmentStatus, BillStatus } from '@prisma/client'
+import { Role, Gender, BloodGroup, HospitalPatientStatus, AppointmentStatus, AppointmentType, BillStatus } from '@prisma/client'
 import * as bcrypt from 'bcryptjs'
 import * as crypto from 'crypto'
 import { StorageService } from 'src/storage/storage.service'
@@ -13,8 +14,55 @@ import { StorageService } from 'src/storage/storage.service'
 // Admin action) or, obviously, a platform-level Super Admin account.
 const INVITABLE_STAFF_ROLES: Role[] = [
   Role.DOCTOR, Role.NURSE, Role.PHARMACIST, Role.LAB_TECHNICIAN, Role.DIETICIAN,
+  Role.RECEPTIONIST, Role.ACCOUNTANT,
+]
+
+// Statuses that still occupy a doctor's time slot.
+const ACTIVE_APPOINTMENT_STATUSES: AppointmentStatus[] = [
+  AppointmentStatus.PENDING,
+  AppointmentStatus.CONFIRMED,
+  AppointmentStatus.CHECKED_IN,
+  AppointmentStatus.IN_PROGRESS,
 ]
  
+// Per-account limit on patient lookups: 10 per minute, 100 per hour.
+const LOOKUP_WINDOWS = [
+  { ms: 60_000, max: 10 },
+  { ms: 3_600_000, max: 100 },
+]
+const lookupHits = new Map<string, number[]>()
+
+function enforceLookupLimit(actorId: string) {
+  const now = Date.now()
+  const longest = LOOKUP_WINDOWS[LOOKUP_WINDOWS.length - 1].ms
+  const hits = (lookupHits.get(actorId) ?? []).filter((t) => now - t < longest)
+  for (const w of LOOKUP_WINDOWS) {
+    if (hits.filter((t) => now - t < w.ms).length >= w.max) {
+      lookupHits.set(actorId, hits)
+      throw new HttpException(
+        'Too many patient lookups. Please wait a moment and try again.',
+        HttpStatus.TOO_MANY_REQUESTS,
+      )
+    }
+  }
+  hits.push(now)
+  lookupHits.set(actorId, hits)
+  if (lookupHits.size > 5000) {
+    for (const [k, v] of lookupHits) if (!v.some((t) => now - t < longest)) lookupHits.delete(k)
+  }
+}
+
+// Specialisation / licence number as typed by an admin: trimmed and length-limited.
+// undefined = not provided (leave as is), null = cleared.
+function cleanProfileText(value: unknown, max: number, label: string): string | null | undefined {
+  if (value === undefined) return undefined
+  if (value === null) return null
+  if (typeof value !== 'string') throw new BadRequestException(`${label} must be text`)
+  const v = value.trim()
+  if (v.length > max) throw new BadRequestException(`${label} must be ${max} characters or fewer`)
+  return v === '' ? null : v
+}
+
 @Injectable()
 export class HospitalAdminService {
   private readonly logger = new Logger(HospitalAdminService.name)
@@ -202,6 +250,7 @@ export class HospitalAdminService {
         avatar: true,
         department: { select: { id: true, name: true } },
         createdAt: true,
+        staffProfile: { select: { specialization: true, licenseNumber: true } },
       },
       orderBy: { createdAt: 'desc' },
     })
@@ -213,6 +262,7 @@ export class HospitalAdminService {
       select: {
         id: true, firstName: true, lastName: true, email: true, role: true,
         active: true, avatar: true, department: { select: { id: true, name: true } }, createdAt: true,
+        staffProfile: { select: { specialization: true, licenseNumber: true } },
       },
     })
     if (!staff) throw new NotFoundException('Staff member not found')
@@ -228,6 +278,8 @@ export class HospitalAdminService {
       email: string
       role: Role
       departmentId?: string
+      specialization?: string | null
+      licenseNumber?: string | null
     },
     actorId: string,
   ) {
@@ -235,7 +287,10 @@ export class HospitalAdminService {
       throw new ForbiddenException('You are not permitted to create a staff account with this role')
     }
  
-    const existing = await this.prisma.user.findUnique({ where: { email: dto.email } })
+    const specialization = cleanProfileText(dto.specialization, 100, 'Specialisation')
+    const licenseNumber = cleanProfileText(dto.licenseNumber, 50, 'Licence number')
+
+    const existing = await this.prisma.user.findUnique({ where: { email: String(dto.email).trim().toLowerCase() } })
     if (existing) {
       throw new ConflictException('A user with this email already exists')
     }
@@ -258,7 +313,7 @@ export class HospitalAdminService {
  
     const staff = await this.prisma.user.create({
       data: {
-        email: dto.email,
+        email: String(dto.email).trim().toLowerCase(),
         firstName: dto.firstName,
         lastName: dto.lastName,
         passwordHash,
@@ -267,6 +322,9 @@ export class HospitalAdminService {
         departmentId: dto.departmentId,
         emailVerified: false,
         hasPassword: true,
+        staffProfile: specialization || licenseNumber
+          ? { create: { specialization, licenseNumber } }
+          : undefined,
       },
       select: {
         id: true, email: true, firstName: true, lastName: true, role: true,
@@ -300,6 +358,8 @@ export class HospitalAdminService {
         role: staff.role,
         departmentId: dto.departmentId ?? null,
         inviteEmailSent: emailSent,
+        specialization: specialization ?? null,
+        licenseNumber: licenseNumber ?? null,
       },
     })
  
@@ -316,13 +376,19 @@ export class HospitalAdminService {
       firstName?: string
       lastName?: string
       departmentId?: string | null
+      specialization?: string | null
+      licenseNumber?: string | null
     },
     actorId: string,
   ) {
     const staff = await this.prisma.user.findFirst({
       where: { id: staffId, hospitalId, role: { in: INVITABLE_STAFF_ROLES } },
+      include: { staffProfile: { select: { specialization: true, licenseNumber: true } } },
     })
     if (!staff) throw new NotFoundException('Staff member not found')
+
+    const specialization = cleanProfileText(dto.specialization, 100, 'Specialisation')
+    const licenseNumber = cleanProfileText(dto.licenseNumber, 50, 'Licence number')
  
     if (dto.departmentId) {
       const department = await this.prisma.department.findFirst({
@@ -331,6 +397,17 @@ export class HospitalAdminService {
       if (!department) throw new NotFoundException('Department not found')
     }
  
+    if (specialization !== undefined || licenseNumber !== undefined) {
+      await this.prisma.staffProfile.upsert({
+        where: { userId: staffId },
+        create: { userId: staffId, specialization: specialization ?? null, licenseNumber: licenseNumber ?? null },
+        update: {
+          ...(specialization !== undefined ? { specialization } : {}),
+          ...(licenseNumber !== undefined ? { licenseNumber } : {}),
+        },
+      })
+    }
+
     const updated = await this.prisma.user.update({
       where: { id: staffId },
       data: {
@@ -341,6 +418,7 @@ export class HospitalAdminService {
       select: {
         id: true, firstName: true, lastName: true, email: true, role: true,
         active: true, department: { select: { id: true, name: true } },
+        staffProfile: { select: { specialization: true, licenseNumber: true } },
       },
     })
  
@@ -349,11 +427,15 @@ export class HospitalAdminService {
       firstName: staff.firstName,
       lastName: staff.lastName,
       departmentId: staff.departmentId,
+      specialization: staff.staffProfile?.specialization ?? null,
+      licenseNumber: staff.staffProfile?.licenseNumber ?? null,
     }
     const afterSnapshot: Record<string, unknown> = {}
     if (dto.firstName !== undefined) afterSnapshot.firstName = dto.firstName
     if (dto.lastName !== undefined) afterSnapshot.lastName = dto.lastName
     if (dto.departmentId !== undefined) afterSnapshot.departmentId = dto.departmentId
+    if (specialization !== undefined) afterSnapshot.specialization = specialization
+    if (licenseNumber !== undefined) afterSnapshot.licenseNumber = licenseNumber
  
     const diff = this.diffForAudit(beforeSnapshot, afterSnapshot)
     if (diff) {
@@ -836,23 +918,30 @@ export class HospitalAdminService {
   }
 
   // ── Patient registration ──────────────────────────────────
-  // Search existing app users (PUBLIC or already-PATIENT) by name,
-  // email or phone, so staff can link an existing account instead of
-  // creating a duplicate. Flags anyone already registered at THIS
-  // hospital so the UI can disable re-registering them.
-  async searchPatientUsers(hospitalId: string, query: string) {
-    if (!query || query.trim().length < 2) return []
- 
+  // Looks up an existing app user (PUBLIC or already-PATIENT) so staff can link
+  // them to the hospital instead of creating a duplicate account.
+  //
+  // Deliberately narrow: someone is returned ONLY when the caller types their
+  // COMPLETE email address or phone number. Names and partial matches return
+  // nothing, so staff cannot browse the platform's user base. Contact details
+  // the caller did not type are masked, and every successful lookup is written
+  // to the audit log. Also flags anyone already registered at THIS hospital.
+  async searchPatientUsers(hospitalId: string, query: string, actorId: string) {
+    const q = (query ?? '').trim()
+    if (!q) return []
+
+    const byEmail = q.includes('@')
+    if (byEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(q)) return []
+    const phones = byEmail ? [] : this.phoneVariants(q)
+    if (!byEmail && phones.length === 0) return []
+
+    enforceLookupLimit(actorId)
+
     const users = await this.prisma.user.findMany({
       where: {
         role: { in: [Role.PUBLIC, Role.PATIENT] },
         deletedAt: null,
-        OR: [
-          { email: { contains: query, mode: 'insensitive' } },
-          { phone: { contains: query, mode: 'insensitive' } },
-          { firstName: { contains: query, mode: 'insensitive' } },
-          { lastName: { contains: query, mode: 'insensitive' } },
-        ],
+        ...(byEmail ? { email: { equals: q, mode: 'insensitive' } } : { phone: { in: phones } }),
       },
       select: {
         id: true,
@@ -865,13 +954,56 @@ export class HospitalAdminService {
         gender: true,
         hospitalPatients: { select: { hospitalId: true } },
       },
-      take: 10,
+      take: 5,
     })
- 
+
+    // Who looked up whom is recorded; the typed email/number itself is not.
+    await Promise.all(
+      users.map((u) =>
+        this.logAudit({
+          hospitalId,
+          userId: actorId,
+          action: 'VIEW',
+          entity: 'PatientLookup',
+          entityId: u.id,
+          after: { matchedBy: byEmail ? 'email' : 'phone' },
+        }),
+      ),
+    )
+
     return users.map(({ hospitalPatients, ...u }) => ({
       ...u,
+      email: byEmail ? u.email : this.maskEmail(u.email),
+      phone: byEmail ? this.maskPhone(u.phone) : u.phone,
       alreadyRegisteredHere: hospitalPatients.some((hp) => hp.hospitalId === hospitalId),
     }))
+  }
+
+  // The forms a phone number may be stored in. Nigerian numbers are commonly
+  // typed as 0801…, 234801… or +234801…, so all three are tried.
+  private phoneVariants(raw: string): string[] {
+    const compact = raw.replace(/[\s\-().]/g, '')
+    const digits = compact.replace(/^\+/, '')
+    if (!/^\d{7,15}$/.test(digits)) return []
+
+    const variants = new Set<string>([compact, digits, `+${digits}`])
+    if (digits.startsWith('234') && digits.length === 13) {
+      variants.add(`0${digits.slice(3)}`)
+    }
+    if (digits.startsWith('0') && digits.length === 11) {
+      variants.add(`234${digits.slice(1)}`)
+      variants.add(`+234${digits.slice(1)}`)
+    }
+    return [...variants]
+  }
+
+  private maskEmail(email: string): string {
+    const [local, domain] = email.split('@')
+    return `${local.slice(0, 1)}***@${domain}`
+  }
+
+  private maskPhone(phone: string | null): string | null {
+    return phone ? `${'*'.repeat(Math.max(phone.length - 4, 3))}${phone.slice(-4)}` : null
   }
  
   // Registers a patient at this hospital — either by linking an
@@ -944,7 +1076,7 @@ export class HospitalAdminService {
         throw new BadRequestException('First name, last name and email are required to create a new patient')
       }
  
-      const existingByEmail = await this.prisma.user.findUnique({ where: { email: dto.email } })
+      const existingByEmail = await this.prisma.user.findUnique({ where: { email: String(dto.email).trim().toLowerCase() } })
       if (existingByEmail) {
         throw new ConflictException('A user with this email already exists — search for them instead of creating a new one')
       }
@@ -954,7 +1086,7 @@ export class HospitalAdminService {
  
       const created = await this.prisma.user.create({
         data: {
-          email: dto.email,
+          email: String(dto.email).trim().toLowerCase(),
           phone: dto.phone,
           passwordHash,
           role: Role.PATIENT,
@@ -981,17 +1113,9 @@ export class HospitalAdminService {
       patientUserId = created.id
     }
  
-    const count = await this.prisma.hospitalPatient.count({ where: { hospitalId } })
-    const patientNumber = `${hospital.slug.slice(0, 3).toUpperCase()}-${new Date().getFullYear()}-${String(count + 1).padStart(5, '0')}`
  
-    const hospitalPatient = await this.prisma.hospitalPatient.create({
-      data: {
-        hospitalId,
-        patientId: patientUserId,
-        patientNumber,
-        status: HospitalPatientStatus.ACTIVE,
-      },
-    })
+    const hospitalPatient = await this.createHospitalPatient(hospitalId, patientUserId, hospital.slug)
+    const patientNumber = hospitalPatient.patientNumber
  
     this.logger.log(`Patient registered: ${patientUserId} (${patientNumber}) at hospital ${hospitalId}`)
  
@@ -1009,6 +1133,205 @@ export class HospitalAdminService {
       })
   
     return { hospitalPatient, temporaryPassword }
+  }
+
+  // Creates the hospital↔patient link with the next free patient number.
+  // Two receptionists registering at the same moment could compute the same
+  // number; the unique index rejects the second, so we simply try the next one.
+  private async createHospitalPatient(hospitalId: string, patientId: string, slug: string) {
+    const prefix = `${slug.slice(0, 3).toUpperCase()}-${new Date().getFullYear()}-`
+    const existing = await this.prisma.hospitalPatient.count({ where: { hospitalId } })
+
+    for (let attempt = 0; ; attempt++) {
+      const patientNumber = `${prefix}${String(existing + 1 + attempt).padStart(5, '0')}`
+      try {
+        return await this.prisma.hospitalPatient.create({
+          data: { hospitalId, patientId, patientNumber, status: HospitalPatientStatus.ACTIVE },
+        })
+      } catch (err: any) {
+        if (err?.code === 'P2002' && attempt < 9) continue
+        throw err
+      }
+    }
+  }
+
+  // ── Hospital branding (any staff role) ────────────────────
+  async getHospitalBrand(hospitalId: string) {
+    const hospital = await this.prisma.hospital.findUnique({
+      where: { id: hospitalId },
+      select: { name: true, logo: true },
+    })
+    if (!hospital) throw new NotFoundException('Hospital not found')
+    return hospital
+  }
+
+  // ── Front desk: booking, today's queue, check-in ──────────
+
+  // Books an appointment for a patient who is already registered here.
+  // `dto.patientId` is the patient's USER id (HospitalPatient.patient.id).
+  async createAppointment(
+    hospitalId: string,
+    dto: {
+      patientId?: string
+      doctorId?: string
+      scheduledAt?: string
+      duration?: number
+      type?: string
+      reason?: string
+    },
+    actorId: string,
+  ) {
+    if (!dto.patientId || !dto.doctorId || !dto.scheduledAt) {
+      throw new BadRequestException('Patient, doctor and appointment time are required')
+    }
+
+    const scheduledAt = new Date(dto.scheduledAt)
+    if (Number.isNaN(scheduledAt.getTime())) {
+      throw new BadRequestException('Invalid appointment time')
+    }
+    // A little grace so a walk-in can be booked for "right now".
+    if (scheduledAt.getTime() < Date.now() - 15 * 60 * 1000) {
+      throw new BadRequestException('Appointment time cannot be in the past')
+    }
+
+    const duration = Math.min(Math.max(Math.round(Number(dto.duration ?? 30)) || 30, 5), 240)
+    const type =
+      dto.type === AppointmentType.TELEMEDICINE ? AppointmentType.TELEMEDICINE : AppointmentType.IN_PERSON
+
+    const registration = await this.prisma.hospitalPatient.findUnique({
+      where: { hospitalId_patientId: { hospitalId, patientId: dto.patientId } },
+      select: { status: true },
+    })
+    if (!registration) {
+      throw new NotFoundException('This person is not registered as a patient at your hospital')
+    }
+    if (registration.status !== HospitalPatientStatus.ACTIVE) {
+      throw new BadRequestException('This patient\u2019s record is not active')
+    }
+
+    const doctor = await this.prisma.user.findFirst({
+      where: { id: dto.doctorId, hospitalId, role: Role.DOCTOR, active: true, deletedAt: null },
+      select: { id: true, firstName: true, lastName: true },
+    })
+    if (!doctor) throw new NotFoundException('Doctor not found')
+
+    // Refuse a slot that overlaps another of this doctor's appointments.
+    const end = new Date(scheduledAt.getTime() + duration * 60 * 1000)
+    const windowStart = new Date(scheduledAt.getTime() - 240 * 60 * 1000) // longest possible duration
+    const nearby = await this.prisma.appointment.findMany({
+      where: {
+        hospitalId,
+        doctorId: doctor.id,
+        deletedAt: null,
+        status: { in: ACTIVE_APPOINTMENT_STATUSES },
+        scheduledAt: { gte: windowStart, lt: end },
+      },
+      select: { scheduledAt: true, duration: true },
+    })
+    const clash = nearby.some(
+      (a) => a.scheduledAt.getTime() + a.duration * 60 * 1000 > scheduledAt.getTime(),
+    )
+    if (clash) {
+      throw new ConflictException(
+        `Dr ${doctor.firstName} ${doctor.lastName} already has an appointment at this time`,
+      )
+    }
+
+    const created = await this.prisma.appointment.create({
+      data: {
+        hospitalId,
+        patientId: dto.patientId,
+        doctorId: doctor.id,
+        type,
+        status: AppointmentStatus.CONFIRMED,
+        scheduledAt,
+        duration,
+        reason: dto.reason?.trim() || undefined,
+      },
+      select: { id: true },
+    })
+
+    await this.logAudit({
+      hospitalId,
+      userId: actorId,
+      action: 'CREATE',
+      entity: 'Appointment',
+      entityId: created.id,
+      after: {
+        patientId: dto.patientId,
+        doctorId: doctor.id,
+        scheduledAt: scheduledAt.toISOString(),
+        duration,
+        type,
+      },
+    })
+
+    return this.getAppointmentDetail(hospitalId, created.id)
+  }
+
+  // The day's appointments in time order, with each patient's hospital
+  // number. The client sends its own local day boundaries (`from`/`to`, ISO)
+  // so "today" is the hospital's day, not the server's.
+  async findQueue(hospitalId: string, from?: string, to?: string) {
+    const start = from ? new Date(from) : new Date(new Date().setHours(0, 0, 0, 0))
+    const end = to ? new Date(to) : new Date(start.getTime() + 24 * 60 * 60 * 1000)
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid date range')
+    }
+
+    const appointments = await this.prisma.appointment.findMany({
+      where: { hospitalId, deletedAt: null, scheduledAt: { gte: start, lt: end } },
+      select: {
+        id: true,
+        type: true,
+        status: true,
+        scheduledAt: true,
+        duration: true,
+        reason: true,
+        patient: { select: { id: true, firstName: true, lastName: true, avatar: true, phone: true } },
+        doctor: { select: { id: true, firstName: true, lastName: true, department: { select: { name: true } } } },
+      },
+      orderBy: { scheduledAt: 'asc' },
+    })
+
+    const registrations = await this.prisma.hospitalPatient.findMany({
+      where: { hospitalId, patientId: { in: appointments.map((a) => a.patient.id) } },
+      select: { patientId: true, patientNumber: true },
+    })
+    const numberOf = new Map(registrations.map((r) => [r.patientId, r.patientNumber]))
+
+    return appointments.map((a) => ({ ...a, patientNumber: numberOf.get(a.patient.id) ?? null }))
+  }
+
+  // Marks a patient as arrived. Only booked appointments can be checked in.
+  async checkInAppointment(hospitalId: string, id: string, actorId: string) {
+    const appointment = await this.prisma.appointment.findFirst({
+      where: { id, hospitalId, deletedAt: null },
+      select: { id: true, status: true },
+    })
+    if (!appointment) throw new NotFoundException('Appointment not found')
+
+    const checkInAllowed: AppointmentStatus[] = [AppointmentStatus.PENDING, AppointmentStatus.CONFIRMED]
+    if (!checkInAllowed.includes(appointment.status)) {
+      throw new BadRequestException(`Cannot check in an appointment that is ${appointment.status}`)
+    }
+
+    await this.prisma.appointment.update({
+      where: { id },
+      data: { status: AppointmentStatus.CHECKED_IN },
+    })
+
+    await this.logAudit({
+      hospitalId,
+      userId: actorId,
+      action: 'UPDATE',
+      entity: 'Appointment',
+      entityId: id,
+      before: { status: appointment.status },
+      after: { status: AppointmentStatus.CHECKED_IN },
+    })
+
+    return this.getAppointmentDetail(hospitalId, id)
   }
 
   async findDoctors(hospitalId: string) {
@@ -1171,147 +1494,6 @@ export class HospitalAdminService {
   }
 
 
-  // ── Billing overview ──────────────────────────────────────
- 
-  async getBillingStats(hospitalId: string) {
-    const now = new Date()
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)
- 
-    const [outstandingAgg, collectedThisMonth, overdueCount] = await Promise.all([
-      this.prisma.bill.aggregate({
-        where: { hospitalId, deletedAt: null, status: { in: [BillStatus.PENDING, BillStatus.PARTIAL, BillStatus.OVERDUE] } },
-        _sum: { totalAmount: true, amountPaid: true },
-      }),
-      this.prisma.payment.aggregate({
-        where: { bill: { hospitalId, deletedAt: null }, paidAt: { gte: startOfMonth } },
-        _sum: { amount: true },
-      }),
-      this.prisma.bill.count({
-        where: { hospitalId, deletedAt: null, status: { in: [BillStatus.PENDING, BillStatus.PARTIAL] }, dueDate: { lt: now } },
-      }),
-    ])
- 
-    const outstanding = (outstandingAgg._sum.totalAmount ?? 0) - (outstandingAgg._sum.amountPaid ?? 0)
- 
-    return {
-      outstanding,
-      collectedThisMonth: collectedThisMonth._sum.amount ?? 0,
-      overdueCount,
-    }
-  }
- 
-  async findAllBills(hospitalId: string, filters: { status?: BillStatus; search?: string }) {
-    let patientIds: string[] | undefined
- 
-    if (filters.search) {
-      const matchingUsers = await this.prisma.user.findMany({
-        where: {
-          OR: [
-            { firstName: { contains: filters.search, mode: 'insensitive' } },
-            { lastName: { contains: filters.search, mode: 'insensitive' } },
-            { email: { contains: filters.search, mode: 'insensitive' } },
-          ],
-        },
-        select: { id: true },
-      })
-      patientIds = matchingUsers.map((u) => u.id)
-    }
- 
-    const bills = await this.prisma.bill.findMany({
-      where: {
-        hospitalId,
-        deletedAt: null,
-        ...(filters.status ? { status: filters.status } : {}),
-        ...(filters.search
-          ? {
-              OR: [
-                { invoiceNo: { contains: filters.search, mode: 'insensitive' } },
-                ...(patientIds && patientIds.length ? [{ patientId: { in: patientIds } }] : []),
-              ],
-            }
-          : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-    })
- 
-    const patients = await this.prisma.user.findMany({
-      where: { id: { in: bills.map((b) => b.patientId) } },
-      select: { id: true, firstName: true, lastName: true, avatar: true },
-    })
-    const patientMap = new Map(patients.map((p) => [p.id, p]))
- 
-    return bills.map((b) => ({ ...b, patient: patientMap.get(b.patientId) ?? null }))
-  }
- 
-  async getBillDetail(hospitalId: string, billId: string) {
-    const bill = await this.prisma.bill.findFirst({
-      where: { id: billId, hospitalId, deletedAt: null },
-      include: {
-        items: true,
-        payments: { orderBy: { paidAt: 'desc' } },
-      },
-    })
-    if (!bill) throw new NotFoundException('Bill not found')
- 
-    const patient = await this.prisma.user.findUnique({
-      where: { id: bill.patientId },
-      select: { id: true, firstName: true, lastName: true, avatar: true, email: true, phone: true },
-    })
- 
-    return { ...bill, patient }
-  }
- 
-  async recordPayment(
-    hospitalId: string,
-    billId: string,
-    dto: { amount: number; method: string; reference?: string },
-    actorId: string,
-  ) {
-    const bill = await this.prisma.bill.findFirst({ where: { id: billId, hospitalId, deletedAt: null } })
-    if (!bill) throw new NotFoundException('Bill not found')
-    if (!dto.amount || dto.amount <= 0) throw new BadRequestException('Payment amount must be greater than zero')
- 
-    const payment = await this.prisma.payment.create({
-      data: { billId, amount: dto.amount, method: dto.method, reference: dto.reference },
-    })
- 
-    const newAmountPaid = bill.amountPaid + dto.amount
-    let status: BillStatus = bill.status
-    if (newAmountPaid >= bill.totalAmount) status = BillStatus.PAID
-    else if (newAmountPaid > 0) status = BillStatus.PARTIAL
- 
-    await this.prisma.bill.update({
-      where: { id: billId },
-      data: {
-        amountPaid: newAmountPaid,
-        status,
-        paidAt: status === BillStatus.PAID ? new Date() : bill.paidAt,
-      },
-    })
- 
-    // Logged as a CREATE on the Payment (the thing that was actually
-    // created), with the bill's balance/status movement alongside so the
-    // viewer shows exactly what the payment did to the invoice.
-    await this.logAudit({
-      hospitalId,
-      userId: actorId,
-      action: 'CREATE',
-      entity: 'Payment',
-      entityId: payment.id,
-      before: { invoiceNo: bill.invoiceNo, billAmountPaid: bill.amountPaid, billStatus: bill.status },
-      after: {
-        invoiceNo: bill.invoiceNo,
-        amount: dto.amount,
-        method: dto.method,
-        reference: dto.reference ?? null,
-        billAmountPaid: newAmountPaid,
-        billStatus: status,
-      },
-    })
- 
-    return this.getBillDetail(hospitalId, billId)
-  }
-
 // ── Part 1: a reusable logging helper ──────────────────────
   async logAudit(params: {
     hospitalId: string
@@ -1332,6 +1514,7 @@ export class HospitalAdminService {
           entityId: params.entityId,
           before: params.before ?? undefined,
           after: params.after ?? undefined,
+          ...auditMeta(),
         },
       })
     } catch (err) {
@@ -1386,6 +1569,7 @@ export class HospitalAdminService {
           before: true,
           after: true,
           ipAddress: true,
+          userAgent: true,
           createdAt: true,
           user: { select: { id: true, firstName: true, lastName: true, avatar: true, role: true } },
         },

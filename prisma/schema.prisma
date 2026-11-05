@@ -208,10 +208,14 @@ model Hospital {
   appointments    Appointment[]
   records         MedicalRecord[]
   labOrders       LabOrder[]
+  priceItems PriceItem[]
   bills           Bill[]
   conversations   Conversation[]
   auditLogs       AuditLog[]
   listing         HospitalListing?    // public-facing profile
+  documents ClinicalDocument[]
+  noteTemplates NoteTemplate[]
+  staffMessages StaffMessage[]
 
   @@index([slug])
   @@index([city, state])
@@ -305,6 +309,14 @@ model User {
 
   passwordResetTokens PasswordResetToken[]
 
+  noteTemplates NoteTemplate[]
+
+  messagesSent     StaffMessage[] @relation("MessagesSent")
+  messagesReceived StaffMessage[] @relation("MessagesReceived")
+
+  patientDocuments  ClinicalDocument[] @relation("PatientDocuments")
+  authoredDocuments ClinicalDocument[] @relation("AuthoredDocuments")
+
   dietProfile      DietProfile?
 
   // Appointments
@@ -325,7 +337,10 @@ model User {
   performedLabOrders LabOrder[] @relation("PerformedLabOrders")
 
   // Bills (as the patient being billed)
-  patientBills Bill[] @relation("PatientBills")
+   patientBills Bill[] @relation("PatientBills")
+
+   billsCreated     Bill[]    @relation("BillCreatedBy")
+   paymentsRecorded Payment[] @relation("PaymentRecordedBy")
 
   // Conversations
   conversations ConversationParticipant[]
@@ -515,6 +530,12 @@ model Appointment {
   records   MedicalRecord[]
   labOrders LabOrder[]
 
+  bills Bill[]
+
+  documents ClinicalDocument[]
+
+  staffMessages StaffMessage[]
+
   @@index([hospitalId])
   @@index([patientId])
   @@index([doctorId])
@@ -670,24 +691,35 @@ model RadiologyRecord {
   createdAt   DateTime      @default(now())
 }
 
+enum PaymentKind {
+  PAYMENT
+  REVERSAL
+}
+
 // ── Billing ────────────────────────────────────────────────
 
 model Bill {
-  id          String     @id @default(cuid())
-  hospitalId  String
-  hospital    Hospital   @relation(fields: [hospitalId], references: [id])
-  patientId   String
-  patient     User       @relation("PatientBills", fields: [patientId], references: [id])
-  invoiceNo   String     @unique
-  status      BillStatus @default(PENDING)
-  totalAmount Float
-  amountPaid  Float      @default(0)
-  dueDate     DateTime
-  paidAt      DateTime?
-  notes       String?
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  deletedAt   DateTime?
+  id            String       @id @default(cuid())
+  hospitalId    String
+  hospital      Hospital     @relation(fields: [hospitalId], references: [id])
+  patientId     String
+  patient       User         @relation("PatientBills", fields: [patientId], references: [id])
+  appointmentId String?
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  createdById   String?
+  createdBy     User?        @relation("BillCreatedBy", fields: [createdById], references: [id])
+  invoiceNo     String       @unique
+  status        BillStatus   @default(PENDING)
+  totalAmount   Int          // kobo
+  amountPaid    Int          @default(0) // kobo
+  dueDate       DateTime
+  paidAt        DateTime?
+  cancelReason  String?
+  cancelledAt   DateTime?
+  notes         String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  deletedAt     DateTime?
 
   items    BillItem[]
   payments Payment[]
@@ -695,6 +727,7 @@ model Bill {
   @@index([hospitalId])
   @@index([patientId])
   @@index([status])
+  @@index([appointmentId])
 }
 
 model BillItem {
@@ -704,23 +737,46 @@ model BillItem {
   type      BillItemType
   name      String
   quantity  Int          @default(1)
-  unitPrice Float
-  total     Float
+  unitPrice Int          // kobo
+  total     Int          // kobo
   createdAt DateTime     @default(now())
 }
 
 model Payment {
-  id        String   @id @default(cuid())
-  billId    String
-  bill      Bill     @relation(fields: [billId], references: [id])
-  amount    Float
-  method    String   // wallet | card | bank
-  reference String?
-  paidAt    DateTime @default(now())
-  createdAt DateTime @default(now())
+  id           String      @id @default(cuid())
+  billId       String
+  bill         Bill        @relation(fields: [billId], references: [id])
+  amount       Int         // kobo; negative for a reversal
+  method       String      // CASH | TRANSFER | CARD | POS
+  reference    String?
+  kind         PaymentKind @default(PAYMENT)
+  reversesId   String?     @unique
+  reverses     Payment?    @relation("PaymentReversal", fields: [reversesId], references: [id])
+  reversedBy   Payment?    @relation("PaymentReversal")
+  note         String?
+  recordedById String?
+  recordedBy   User?       @relation("PaymentRecordedBy", fields: [recordedById], references: [id])
+  paidAt       DateTime    @default(now())
+  createdAt    DateTime    @default(now())
 
   @@index([billId])
+  @@index([paidAt])
 }
+
+model PriceItem {
+  id         String       @id @default(cuid())
+  hospitalId String
+  hospital   Hospital     @relation(fields: [hospitalId], references: [id])
+  type       BillItemType
+  name       String
+  price      Int          // kobo
+  active     Boolean      @default(true)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  @@index([hospitalId, type])
+}
+
 
 model Wallet {
   id        String   @id @default(cuid())
@@ -949,4 +1005,67 @@ model FoodLog {
 
   @@index([dietProfileId])
   @@index([date])
+}
+
+enum ClinicalDocumentType {
+  SICK_NOTE
+  REFERRAL
+}
+
+model ClinicalDocument {
+  id            String               @id @default(cuid())
+  reference     String               @unique
+  type          ClinicalDocumentType
+  hospitalId    String
+  hospital      Hospital             @relation(fields: [hospitalId], references: [id])
+  patientId     String
+  patient       User                 @relation("PatientDocuments", fields: [patientId], references: [id])
+  authorId      String
+  author        User                 @relation("AuthoredDocuments", fields: [authorId], references: [id])
+  appointmentId String?
+  appointment   Appointment?         @relation(fields: [appointmentId], references: [id])
+  content       Json
+  createdAt     DateTime             @default(now())
+
+  @@index([hospitalId, patientId])
+  @@index([appointmentId])
+}
+
+model NoteTemplate {
+  id         String   @id @default(cuid())
+  hospitalId String
+  hospital   Hospital @relation(fields: [hospitalId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  name       String
+  symptoms   String   @default("")
+  findings   String   @default("")
+  notes      String   @default("")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, name])
+  @@index([hospitalId])
+}
+
+model StaffMessage {
+  id            String       @id @default(cuid())
+  hospitalId    String
+  hospital      Hospital     @relation(fields: [hospitalId], references: [id])
+  senderId      String
+  sender        User         @relation("MessagesSent", fields: [senderId], references: [id])
+  recipientId   String
+  recipient     User         @relation("MessagesReceived", fields: [recipientId], references: [id])
+  appointmentId String
+  appointment   Appointment  @relation(fields: [appointmentId], references: [id])
+  replyToId     String?
+  body          String
+  readAt        DateTime?
+  createdAt     DateTime     @default(now())
+
+  @@index([recipientId, readAt])
+  @@index([recipientId, createdAt])
+  @@index([senderId, createdAt])
+  @@index([appointmentId])
+  @@index([hospitalId])
 }

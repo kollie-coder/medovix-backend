@@ -4,12 +4,22 @@ import { FileInterceptor } from '@nestjs/platform-express'
 import { PrismaService } from '../prisma/prisma.service'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { RolesGuard } from '../auth/guards/roles.guard'
+import { HospitalScopeGuard } from '../auth/guards/hospital-scope.guard'
 import { Roles } from '../auth/decorators/roles.decorator'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { Role } from '@prisma/client'
+
+// Who may use which routes. The class-level @Roles(Role.ADMIN) below is the
+// default; a route-level @Roles(...) replaces it for that route only.
+const FRONT_DESK: Role[] = [Role.ADMIN, Role.RECEPTIONIST]
+const BILLING: Role[] = [Role.ADMIN, Role.ACCOUNTANT]
+const ANY_HOSPITAL_STAFF: Role[] = [
+  Role.ADMIN, Role.RECEPTIONIST, Role.ACCOUNTANT, Role.DOCTOR, Role.NURSE,
+  Role.PHARMACIST, Role.LAB_TECHNICIAN, Role.DIETICIAN,
+]
  
 @Controller('hospital-admin')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, HospitalScopeGuard)
 @Roles(Role.ADMIN)
 export class HospitalAdminController {
   constructor(
@@ -207,6 +217,7 @@ export class HospitalAdminController {
       return this.hospitalAdminService.updateStaffPhoto(hospitalId, id, file, actorId)
     }
 
+  @Roles(...FRONT_DESK)
   @Get('patients')
     findAllPatients(
       @CurrentUser('hospitalId') hospitalId: string,
@@ -215,6 +226,7 @@ export class HospitalAdminController {
       return this.hospitalAdminService.findAllPatients(hospitalId, search)
     }
 
+  @Roles(...FRONT_DESK)
   @Patch('patients/:id')
   updatePatientRecord(
     @CurrentUser('hospitalId') hospitalId: string,
@@ -242,14 +254,17 @@ export class HospitalAdminController {
     return this.hospitalAdminService.updatePatientRecord(hospitalId, id, dto as any, actorId)
   }
 
+   @Roles(...FRONT_DESK)
    @Get('patients/search')
     searchPatientUsers(
       @CurrentUser('hospitalId') hospitalId: string,
+      @CurrentUser('id') actorId: string,
       @Query('q') q: string,
     ) {
-      return this.hospitalAdminService.searchPatientUsers(hospitalId, q)
+      return this.hospitalAdminService.searchPatientUsers(hospitalId, q, actorId)
     }
 
+  @Roles(...FRONT_DESK)
   @Get('patients/:id')
     getPatientDetail(
       @CurrentUser('hospitalId') hospitalId: string,
@@ -258,6 +273,7 @@ export class HospitalAdminController {
       return this.hospitalAdminService.getPatientDetail(hospitalId, id)
     }
  
+  @Roles(...FRONT_DESK)
   @Post('patients')
     registerPatient(
       @CurrentUser('hospitalId') hospitalId: string,
@@ -284,11 +300,57 @@ export class HospitalAdminController {
     }
 
 
+  // ── Front desk ───────────────────────────────────────────
+  @Roles(...ANY_HOSPITAL_STAFF)
+  @Get('hospital/brand')
+  getHospitalBrand(@CurrentUser('hospitalId') hospitalId: string) {
+    return this.hospitalAdminService.getHospitalBrand(hospitalId)
+  }
+
+  @Roles(...FRONT_DESK)
+  @Get('appointments/queue')
+  findQueue(
+    @CurrentUser('hospitalId') hospitalId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.hospitalAdminService.findQueue(hospitalId, from, to)
+  }
+
+  @Roles(...FRONT_DESK)
+  @Post('appointments')
+  createAppointment(
+    @CurrentUser('hospitalId') hospitalId: string,
+    @CurrentUser('id') actorId: string,
+    @Body() dto: {
+      patientId?: string
+      doctorId?: string
+      scheduledAt?: string
+      duration?: number
+      type?: string
+      reason?: string
+    },
+  ) {
+    return this.hospitalAdminService.createAppointment(hospitalId, dto, actorId)
+  }
+
+  @Roles(...FRONT_DESK)
+  @Post('appointments/:id/check-in')
+  checkInAppointment(
+    @CurrentUser('hospitalId') hospitalId: string,
+    @CurrentUser('id') actorId: string,
+    @Param('id') id: string,
+  ) {
+    return this.hospitalAdminService.checkInAppointment(hospitalId, id, actorId)
+  }
+
+  @Roles(...FRONT_DESK)
   @Get('appointments/doctors')
     findDoctors(@CurrentUser('hospitalId') hospitalId: string) {
       return this.hospitalAdminService.findDoctors(hospitalId)
     }
  
+  @Roles(...FRONT_DESK)
   @Get('appointments')
     findAllAppointments(
       @CurrentUser('hospitalId') hospitalId: string,
@@ -307,6 +369,7 @@ export class HospitalAdminController {
       })
     }
  
+  @Roles(...FRONT_DESK)
   @Get('appointments/:id')
     getAppointmentDetail(
       @CurrentUser('hospitalId') hospitalId: string,
@@ -315,6 +378,7 @@ export class HospitalAdminController {
       return this.hospitalAdminService.getAppointmentDetail(hospitalId, id)
     }
  
+  @Roles(...FRONT_DESK)
   @Patch('appointments/:id')
   updateAppointment(
     @CurrentUser('hospitalId') hospitalId: string,
@@ -330,38 +394,6 @@ export class HospitalAdminController {
   ) {
     return this.hospitalAdminService.updateAppointment(hospitalId, id, dto as any, actorId)
   }
-
-  @Get('billing/stats')
-    getBillingStats(@CurrentUser('hospitalId') hospitalId: string) {
-      return this.hospitalAdminService.getBillingStats(hospitalId)
-    }
- 
-  @Get('billing')
-    findAllBills(
-      @CurrentUser('hospitalId') hospitalId: string,
-      @Query('status') status?: string,
-      @Query('search') search?: string,
-    ) {
-      return this.hospitalAdminService.findAllBills(hospitalId, { status: status as any, search })
-    }
- 
-  @Get('billing/:id')
-    getBillDetail(
-      @CurrentUser('hospitalId') hospitalId: string,
-      @Param('id') id: string,
-    ) {
-      return this.hospitalAdminService.getBillDetail(hospitalId, id)
-    }
- 
-   @Post('billing/:id/payments')
-    recordPayment(
-      @CurrentUser('hospitalId') hospitalId: string,
-      @CurrentUser('id') actorId: string,
-      @Param('id') id: string,
-      @Body() dto: { amount: number; method: string; reference?: string },
-    ) {
-      return this.hospitalAdminService.recordPayment(hospitalId, id, dto, actorId)
-    }
 
   @Get('audit-log/entities')
     findAuditEntities(@CurrentUser('hospitalId') hospitalId: string) {
