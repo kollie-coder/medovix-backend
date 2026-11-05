@@ -1,7 +1,7 @@
-// src/auth/auth.controller.ts (full file with profile update added)
 import {
   Controller, Post, Get, Put, Body, UseGuards, HttpCode,
 } from '@nestjs/common'
+import { Throttle } from '@nestjs/throttler'
 import { AuthService } from './auth.service'
 import { RegisterDto } from './dto/register.dto'
 import { LoginDto } from './dto/login.dto'
@@ -13,6 +13,7 @@ export class AuthController {
   constructor(private authService: AuthService) {}
 
   @Post('delete-account')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @UseGuards(JwtAuthGuard)
   @HttpCode(200)
   deleteAccount(
@@ -23,17 +24,20 @@ export class AuthController {
   } 
 
   @Post('register')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto)
   }
 
   @Post('login')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(200)
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto)
   }
 
   @Post('google/native')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @HttpCode(200)
   googleAuthNative(@Body('idToken') idToken: string) {
     return this.authService.googleAuthNative(idToken)
@@ -60,6 +64,7 @@ export class AuthController {
 
 
   @Put('change-password')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @UseGuards(JwtAuthGuard)
   @HttpCode(200)
   changePassword(
@@ -70,12 +75,14 @@ export class AuthController {
   }
 
 @Post('forgot-password')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
 @HttpCode(200)
 requestPasswordReset(@Body('email') email: string) {
   return this.authService.requestPasswordReset(email)
 }
  
 @Post('verify-reset-code')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
 @HttpCode(200)
 verifyResetCode(
   @Body('email') email: string,
@@ -85,6 +92,7 @@ verifyResetCode(
 }
  
 @Post('reset-password')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
 @HttpCode(200)
 resetPassword(
   @Body('email') email: string,
@@ -105,6 +113,7 @@ resetPassword(
   }
   
   @Post('2fa/verify')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @UseGuards(JwtAuthGuard)
   @HttpCode(200)
   verify2FA(
@@ -141,6 +150,7 @@ resetPassword(
     }
       
   @Post('2fa/login-verify')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(200)
   completeLogin2FA(
     @Body('pendingToken') pendingToken: string,

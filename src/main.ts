@@ -1,11 +1,16 @@
 import { NestFactory } from '@nestjs/core'
+import { NestExpressApplication } from '@nestjs/platform-express'
 import { AppModule } from './app.module'
 import { ValidationPipe, Logger } from '@nestjs/common'
 import { PrismaExceptionFilter } from './common/prisma-exception.filter'
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule)
+  const app = await NestFactory.create<NestExpressApplication>(AppModule)
   const logger = new Logger('Bootstrap')
+
+  // Render puts a proxy in front of the app. Without this, every request looks
+  // like it comes from the proxy's IP and rate limits would apply to everyone at once.
+  app.set('trust proxy', 1)
 
   app.setGlobalPrefix('api/v1')
 

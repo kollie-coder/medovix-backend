@@ -35,14 +35,14 @@ export class SuperAdminService {
     adminEmail: string
   }) {
     const existingHospital = await this.prisma.hospital.findUnique({
-      where: { email: dto.hospitalEmail },
+      where: { email: String(dto.hospitalEmail).trim().toLowerCase() },
     })
     if (existingHospital) {
       throw new ConflictException('A hospital with this email already exists')
     }
  
     const existingUser = await this.prisma.user.findUnique({
-      where: { email: dto.adminEmail },
+      where: { email: String(dto.adminEmail).trim().toLowerCase() },
     })
     if (existingUser) {
       throw new ConflictException('A user with this admin email already exists')
@@ -67,7 +67,7 @@ export class SuperAdminService {
           state: dto.state,
           country: dto.country ?? 'Nigeria',
           phone: dto.phone,
-          email: dto.hospitalEmail,
+          email: String(dto.hospitalEmail).trim().toLowerCase(),
           website: dto.website,
           active: true,
         },
@@ -75,7 +75,7 @@ export class SuperAdminService {
  
       const admin = await tx.user.create({
         data: {
-          email: dto.adminEmail,
+          email: String(dto.adminEmail).trim().toLowerCase(),
           firstName: dto.adminFirstName,
           lastName: dto.adminLastName,
           passwordHash,
