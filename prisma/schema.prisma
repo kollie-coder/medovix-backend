@@ -962,6 +962,7 @@ model DietProfile {
   updatedAt      DateTime        @updatedAt
 
   foodLogs       FoodLog[]
+  waterLogs      WaterLog[]
 }
 
 model FoodItem {
@@ -1068,4 +1069,16 @@ model StaffMessage {
   @@index([senderId, createdAt])
   @@index([appointmentId])
   @@index([hospitalId])
+}
+
+// Water the patient has logged (one row per drink)
+model WaterLog {
+  id            String      @id @default(cuid())
+  dietProfileId String
+  dietProfile   DietProfile @relation(fields: [dietProfileId], references: [id], onDelete: Cascade)
+  amountMl      Int
+  date          String      // YYYY-MM-DD, the patient's local day
+  loggedAt      DateTime    @default(now())
+
+  @@index([dietProfileId, date])
 }
