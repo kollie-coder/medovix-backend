@@ -68,6 +68,22 @@ export class DietaryService {
     }
   }
 
+  // YYYY-MM-DD that is a real calendar date (rejects 2026-02-31)
+  private assertDate(date: string, field = 'date') {
+    const ok =
+      typeof date === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(date) &&
+      !isNaN(Date.parse(`${date}T00:00:00Z`)) &&
+      new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date
+    if (!ok) throw new BadRequestException(`${field} must be a valid date in YYYY-MM-DD format`)
+  }
+
+  private previousDay(date: string): string {
+    const d = new Date(`${date}T00:00:00Z`)
+    d.setUTCDate(d.getUTCDate() - 1)
+    return d.toISOString().slice(0, 10)
+  }
+
   private adherence(consumed: number, target: number) {
     if (!target || target <= 0) return 0
     return Math.min(Math.round((consumed / target) * 100), 100)
@@ -149,9 +165,18 @@ export class DietaryService {
     protein: acc.protein + log.protein,
     fat: acc.fat + log.fat,
   }), { calories: 0, carbs: 0, protein: 0, fat: 0 })
+
+  // Water must never stop the food summary from loading
+  let waterMl = 0
+  try {
+    waterMl = await this.waterTotal(profile.id, date)
+  } catch (err) {
+    this.logger.warn(`Could not read water total: ${(err as Error).message}`)
+  }
  
   return {
     date,
+    waterMl,
     totals,
     targets: {
       calories: profile.dailyCalories,
@@ -226,6 +251,203 @@ async getWeeklySummary(userId: string, startDate: string) {
       },
       include: { foodItem: true },
     })
+  }
+
+  // ── Recent and frequent foods ──────────────────────────
+  // Returns up to 12 distinct foods the user has logged: the 6 most recent
+  // first (for the given meal when possible), then the most frequent of the
+  // rest. Custom foods are de-duplicated by name because every custom log
+  // creates its own FoodItem row.
+  async getRecentFoods(userId: string, opts: { mealType?: MealType; date?: string }) {
+    const profile = await this.getOrCreateProfile(userId)
+
+    const logs = await this.prisma.foodLog.findMany({
+      where: { dietProfileId: profile.id },
+      orderBy: { loggedAt: 'desc' },
+      take: 300,
+      include: { foodItem: true },
+    })
+
+    type Agg = {
+      foodItem: (typeof logs)[number]['foodItem']
+      lastPortionGrams: number
+      lastCalories: number
+      lastLoggedAt: Date
+      timesLogged: number
+      mealHits: number
+    }
+    const byFood = new Map<string, Agg>()
+    for (const log of logs) {
+      const f = log.foodItem
+      const key = f.origin === 'custom' ? `custom:${f.name.trim().toLowerCase()}` : f.id
+      const hit = opts.mealType && log.mealType === opts.mealType ? 1 : 0
+      const existing = byFood.get(key)
+      if (existing) {
+        existing.timesLogged += 1
+        existing.mealHits += hit
+        continue
+      }
+      // logs are newest-first, so the first sighting is the latest log
+      byFood.set(key, {
+        foodItem: f,
+        lastPortionGrams: log.portionGrams,
+        lastCalories: log.calories,
+        lastLoggedAt: log.loggedAt,
+        timesLogged: 1,
+        mealHits: hit,
+      })
+    }
+
+    let ordered = [...byFood.values()]
+    if (opts.mealType) {
+      ordered = [
+        ...ordered.filter(a => a.mealHits > 0),
+        ...ordered.filter(a => a.mealHits === 0),
+      ]
+    }
+    const newest = ordered.slice(0, 6)
+    const frequent = ordered
+      .slice(6)
+      .sort((a, b) => b.timesLogged - a.timesLogged || b.lastLoggedAt.getTime() - a.lastLoggedAt.getTime())
+    const recent = [...newest, ...frequent].slice(0, 12).map(a => ({
+      foodItem: a.foodItem,
+      lastPortionGrams: a.lastPortionGrams,
+      lastCalories: Math.round(a.lastCalories),
+      timesLogged: a.timesLogged,
+      lastLoggedAt: a.lastLoggedAt,
+    }))
+
+    // What was eaten for this meal the day before (powers "Copy yesterday")
+    let yesterdayMeal: { date: string; count: number; calories: number } | null = null
+    if (opts.date && opts.mealType) {
+      this.assertDate(opts.date)
+      const from = this.previousDay(opts.date)
+      const y = await this.prisma.foodLog.findMany({
+        where: { dietProfileId: profile.id, date: from, mealType: opts.mealType },
+        select: { calories: true },
+      })
+      if (y.length > 0) {
+        yesterdayMeal = {
+          date: from,
+          count: y.length,
+          calories: Math.round(y.reduce((s, l) => s + l.calories, 0)),
+        }
+      }
+    }
+
+    return { recent, yesterdayMeal }
+  }
+
+  // ── Copy a meal from one day to another ────────────────
+  async copyMeal(userId: string, dto: { fromDate: string; toDate: string; mealType: MealType }) {
+    this.assertDate(dto.fromDate, 'fromDate')
+    this.assertDate(dto.toDate, 'toDate')
+    if (dto.fromDate === dto.toDate) {
+      throw new BadRequestException('Choose a different day to copy from')
+    }
+    const profile = await this.getOrCreateProfile(userId)
+
+    const source = await this.prisma.foodLog.findMany({
+      where: { dietProfileId: profile.id, date: dto.fromDate, mealType: dto.mealType },
+      orderBy: { loggedAt: 'asc' },
+      take: 50,
+    })
+    if (source.length === 0) return { copied: 0 }
+
+    await this.prisma.foodLog.createMany({
+      data: source.map(l => ({
+        dietProfileId: profile.id,
+        foodItemId: l.foodItemId,
+        mealType: l.mealType,
+        portionGrams: l.portionGrams,
+        calories: l.calories,
+        carbs: l.carbs,
+        protein: l.protein,
+        fat: l.fat,
+        date: dto.toDate,
+      })),
+    })
+    return { copied: source.length }
+  }
+
+  // ── Change the amount of a logged food ─────────────────
+  async updateLogPortion(userId: string, logId: string, portionGrams: number) {
+    this.assertPortion(portionGrams)
+    const profile = await this.getOrCreateProfile(userId)
+
+    const log = await this.prisma.foodLog.findFirst({
+      where: { id: logId, dietProfileId: profile.id },
+      include: { foodItem: true },
+    })
+    if (!log) throw new NotFoundException('Log entry not found')
+
+    const f = log.foodItem
+    const factor = portionGrams / 100
+    return this.prisma.foodLog.update({
+      where: { id: log.id },
+      data: {
+        portionGrams,
+        calories: +(f.calories * factor).toFixed(1),
+        carbs: +(f.carbs * factor).toFixed(1),
+        protein: +(f.protein * factor).toFixed(1),
+        fat: +(f.fat * factor).toFixed(1),
+      },
+      include: { foodItem: true },
+    })
+  }
+
+  // ── Water tracking ─────────────────────────────────────
+  private static readonly MAX_DAILY_WATER_ML = 10000
+
+  private async waterTotal(dietProfileId: string, date: string): Promise<number> {
+    const agg = await this.prisma.waterLog.aggregate({
+      where: { dietProfileId, date },
+      _sum: { amountMl: true },
+    })
+    return agg._sum.amountMl ?? 0
+  }
+
+  private async waterSummary(profile: { id: string; dailyWater: number }, date: string) {
+    return {
+      date,
+      totalMl: await this.waterTotal(profile.id, date),
+      targetMl: Math.round(profile.dailyWater * 1000),
+    }
+  }
+
+  async getWater(userId: string, date: string) {
+    this.assertDate(date)
+    const profile = await this.getOrCreateProfile(userId)
+    return this.waterSummary(profile, date)
+  }
+
+  async addWater(userId: string, dto: { amountMl: number; date: string }) {
+    this.assertDate(dto.date)
+    if (!Number.isInteger(dto.amountMl) || dto.amountMl < 50 || dto.amountMl > 2000) {
+      throw new BadRequestException('amountMl must be a whole number between 50 and 2000')
+    }
+    const profile = await this.getOrCreateProfile(userId)
+
+    const current = await this.waterTotal(profile.id, dto.date)
+    if (current + dto.amountMl > DietaryService.MAX_DAILY_WATER_ML) {
+      throw new BadRequestException('That would go over the daily limit for water')
+    }
+    await this.prisma.waterLog.create({
+      data: { dietProfileId: profile.id, date: dto.date, amountMl: dto.amountMl },
+    })
+    return this.waterSummary(profile, dto.date)
+  }
+
+  // Undo: removes the most recent drink logged for that day
+  async undoLastWater(userId: string, date: string) {
+    this.assertDate(date)
+    const profile = await this.getOrCreateProfile(userId)
+    const latest = await this.prisma.waterLog.findFirst({
+      where: { dietProfileId: profile.id, date },
+      orderBy: { loggedAt: 'desc' },
+    })
+    if (latest) await this.prisma.waterLog.delete({ where: { id: latest.id } })
+    return this.waterSummary(profile, date)
   }
 
   // ── Delete a food log entry ────────────────────────────

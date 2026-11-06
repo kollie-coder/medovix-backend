@@ -1,13 +1,15 @@
-// src/dietary/dietary.controller.ts
 import {
-  Controller, Get, Post, Put, Delete,
-  Body, Param, Query, UseGuards,
+  Controller, Get, Post, Put, Patch, Delete,
+  Body, Param, Query, UseGuards, BadRequestException,
 } from '@nestjs/common'
 import { DietaryService } from './dietary.service'
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard'
 import { CurrentUser } from '../auth/decorators/current-user.decorator'
 import { HealthCondition, ActivityLevel, MealType } from '@prisma/client'
 import { DietAccessGuard } from "../common/diet-access.guard"
+import { AddWaterDto, CopyMealDto, UpdateLogDto } from './dietary.dto'
+
+const todayUtc = () => new Date().toISOString().split('T')[0]
 
 @Controller('dietary')
 @UseGuards(JwtAuthGuard, DietAccessGuard)
@@ -120,6 +122,60 @@ export class DietaryController {
       ...dto,
       date: dto.date ?? new Date().toISOString().split('T')[0],
     })
+  }
+
+  // GET /api/v1/dietary/recent?mealType=LUNCH&date=2026-11-06
+  // Recent and frequent foods, plus what was eaten for that meal yesterday
+  @Get('recent')
+  getRecentFoods(
+    @CurrentUser('id') userId: string,
+    @Query('mealType') mealType?: string,
+    @Query('date') date?: string,
+  ) {
+    if (mealType && !['BREAKFAST', 'LUNCH', 'DINNER', 'SNACK'].includes(mealType)) {
+      throw new BadRequestException('mealType must be BREAKFAST, LUNCH, DINNER or SNACK')
+    }
+    return this.dietaryService.getRecentFoods(userId, {
+      mealType: mealType as MealType | undefined,
+      date,
+    })
+  }
+
+  // POST /api/v1/dietary/log/copy  { fromDate, toDate, mealType }
+  @Post('log/copy')
+  copyMeal(@CurrentUser('id') userId: string, @Body() dto: CopyMealDto) {
+    return this.dietaryService.copyMeal(userId, dto)
+  }
+
+  // PATCH /api/v1/dietary/log/:id  { portionGrams }
+  @Patch('log/:id')
+  updateLog(
+    @CurrentUser('id') userId: string,
+    @Param('id') logId: string,
+    @Body() dto: UpdateLogDto,
+  ) {
+    return this.dietaryService.updateLogPortion(userId, logId, dto.portionGrams)
+  }
+
+  // GET /api/v1/dietary/water?date=2026-11-06
+  @Get('water')
+  getWater(@CurrentUser('id') userId: string, @Query('date') date?: string) {
+    return this.dietaryService.getWater(userId, date ?? todayUtc())
+  }
+
+  // POST /api/v1/dietary/water  { amountMl, date }
+  @Post('water')
+  addWater(@CurrentUser('id') userId: string, @Body() dto: AddWaterDto) {
+    return this.dietaryService.addWater(userId, {
+      amountMl: dto.amountMl,
+      date: dto.date ?? todayUtc(),
+    })
+  }
+
+  // DELETE /api/v1/dietary/water/latest?date=2026-11-06  (undo last drink)
+  @Delete('water/latest')
+  undoWater(@CurrentUser('id') userId: string, @Query('date') date?: string) {
+    return this.dietaryService.undoLastWater(userId, date ?? todayUtc())
   }
 
   // DELETE /api/v1/dietary/log/:id
