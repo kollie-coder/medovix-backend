@@ -1,45 +1,55 @@
-// src/reminders/dto/update-reminder.dto.ts
-import {
-  IsString, IsEnum, IsArray, IsOptional,
-  IsDateString, IsBoolean,
-} from 'class-validator'
 import { ReminderFrequency, MealTiming } from '@prisma/client'
+import { Transform } from 'class-transformer'
+import {
+  IsArray, ArrayMinSize, ArrayMaxSize, IsBoolean, IsDateString, IsEnum, IsInt,
+  IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength,
+} from 'class-validator'
+import { HH_MM } from './create-reminder.dto'
 
+// '' means "clear this value"
+const blankToNull = ({ value }: { value: unknown }) => (value === '' ? null : value)
 
+// Every field is optional. IsOptional also lets `null` through, which is how
+// endDate / pillsRemaining are cleared.
 export class UpdateReminderDto {
-  @IsString()
-  @IsOptional()
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(100)
   drugName?: string
 
-  @IsString()
-  @IsOptional()
+  @IsOptional() @IsString() @MinLength(1) @MaxLength(50)
   dosage?: string
 
-  @IsEnum(ReminderFrequency)
-  @IsOptional()
+  @IsOptional() @IsEnum(ReminderFrequency)
   frequency?: ReminderFrequency
 
-  @IsArray()
-  @IsOptional()
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(6)
+  @Matches(HH_MM, { each: true, message: 'Each time must look like 08:00' })
   times?: string[]
 
-  @IsEnum(MealTiming)
-  @IsOptional()
+  @IsOptional() @IsEnum(MealTiming)
   mealTiming?: MealTiming
 
-  @IsDateString()
-  @IsOptional()
-  endDate?: string
+  @IsOptional() @IsDateString()
+  startDate?: string
 
-  @IsString()
-  @IsOptional()
+  @IsOptional() @Transform(blankToNull) @IsDateString()
+  endDate?: string | null
+
+  @IsOptional() @Matches(/^#[0-9A-Fa-f]{6}$/)
   color?: string
 
-  @IsString()
-  @IsOptional()
+  @IsOptional() @IsString() @MaxLength(500)
   notes?: string
 
-  @IsBoolean()
-  @IsOptional()
+  @IsOptional() @IsBoolean()
   active?: boolean
+
+  /** Set a number to (re)start tracking / record a refill; null stops tracking. */
+  @IsOptional() @IsInt() @Min(0) @Max(100000)
+  pillsRemaining?: number | null
+
+  @IsOptional() @IsInt() @Min(1) @Max(20)
+  pillsPerDose?: number
+
+  @IsOptional() @IsInt() @Min(1) @Max(60)
+  refillAlertDays?: number
 }
