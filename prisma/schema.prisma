@@ -483,6 +483,10 @@ model MedicationReminder {
   updatedAt   DateTime          @updatedAt
   deletedAt   DateTime?
 
+  pillsRemaining  Int?      // estimated pills left (null = not tracked)
+  pillsPerDose    Int       @default(1)
+  refillAlertDays Int       @default(7)
+
   doses ReminderDose[]
 
   @@index([userId])
@@ -498,10 +502,12 @@ model ReminderDose {
   takenAt      DateTime?          // when it was actually taken (null = not taken yet)
   skipped      Boolean            @default(false)
   snoozedUntil DateTime?
+  pillsDeducted Boolean            @default(false)
   createdAt    DateTime           @default(now())
 
   @@index([reminderId])
   @@index([scheduledAt])
+  @@index([reminderId, scheduledAt])
 }
 
 // ── Appointments ───────────────────────────────────────────

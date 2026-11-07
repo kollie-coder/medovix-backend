@@ -1,23 +1,22 @@
-// src/reminders/dto/mark-dose.dto.ts
-import {
-  IsString, IsEnum, IsArray, IsOptional,
-  IsDateString, IsBoolean,
-} from 'class-validator'
-import { ReminderFrequency, MealTiming } from '@prisma/client'
+import { IsBoolean, IsDateString, IsOptional } from 'class-validator'
 
+/**
+ * Only the fields you send are changed:
+ *   { taken: true }                 -> mark taken
+ *   { skipped: true }               -> mark skipped
+ *   { taken: false, skipped: false} -> back to pending (undo)
+ *   { snoozedUntil: '<iso>' }       -> remember a snooze (null clears it)
+ */
 export class MarkDoseDto {
   @IsDateString()
   scheduledAt: string
 
-  @IsBoolean()
-  @IsOptional()
+  @IsOptional() @IsBoolean()
   taken?: boolean
 
-  @IsBoolean()
-  @IsOptional()
+  @IsOptional() @IsBoolean()
   skipped?: boolean
 
-  @IsDateString()
-  @IsOptional()
-  snoozedUntil?: string
+  @IsOptional() @IsDateString()
+  snoozedUntil?: string | null
 }

@@ -1,7 +1,5 @@
-// src/reminders/reminders.controller.ts
 import {
-  Controller, Get, Post, Patch, Delete,
-  Body, Param, UseGuards,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards,
 } from '@nestjs/common'
 import { RemindersService } from './reminders.service'
 import { CreateReminderDto } from './dto/create-reminder.dto'
@@ -15,24 +13,40 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator'
 export class RemindersController {
   constructor(private remindersService: RemindersService) {}
 
-  // GET /api/v1/reminders
+  // GET /api/v1/reminders?from=<iso>&to=<iso>
+  // from/to = start/end of the patient's local day (defaults to the UTC day)
   @Get()
-  findAll(@CurrentUser('id') userId: string) {
-    return this.remindersService.findAll(userId)
+  findAll(
+    @CurrentUser('id') userId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.remindersService.findAll(userId, from, to)
   }
 
-  // GET /api/v1/reminders/today
+  // GET /api/v1/reminders/today?from=&to=
   @Get('today')
-  getTodaySummary(@CurrentUser('id') userId: string) {
-    return this.remindersService.getTodaySummary(userId)
+  getTodaySummary(
+    @CurrentUser('id') userId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.remindersService.getTodaySummary(userId, from, to)
+  }
+
+  // GET /api/v1/reminders/doses?from=&to=   (max 62 days) — for adherence
+  @Get('doses')
+  getDoses(
+    @CurrentUser('id') userId: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.remindersService.getDoses(userId, from, to)
   }
 
   // POST /api/v1/reminders
   @Post()
-  create(
-    @CurrentUser('id') userId: string,
-    @Body() dto: CreateReminderDto,
-  ) {
+  create(@CurrentUser('id') userId: string, @Body() dto: CreateReminderDto) {
     return this.remindersService.create(userId, dto)
   }
 
@@ -48,10 +62,7 @@ export class RemindersController {
 
   // DELETE /api/v1/reminders/:id
   @Delete(':id')
-  remove(
-    @CurrentUser('id') userId: string,
-    @Param('id') id: string,
-  ) {
+  remove(@CurrentUser('id') userId: string, @Param('id') id: string) {
     return this.remindersService.remove(userId, id)
   }
 
